@@ -10,9 +10,15 @@ pub fn listen_sockets(addr: []const u8, port: u16) !void {
 }
 
 pub fn main_loop() !void {
+    var buf: [1024]u8 = undefined;
     while (true) {
         const conn = try server.accept();
-        log.info("client connect: {any}", .{conn.address});
-        conn.stream.close();
+        defer conn.stream.close();
+
+        log.info("client connected: {any}", .{conn.address});
+
+        const len = try conn.stream.read(&buf);
+
+        log.info("client data: len = {}, content = {any}", .{ len, buf[0..len] });
     }
 }
