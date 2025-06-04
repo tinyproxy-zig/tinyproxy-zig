@@ -9,16 +9,22 @@ pub fn listen_sockets(addr: []const u8, port: u16) !void {
     server = try address.listen(.{ .kernel_backlog = 1024 });
 }
 
-pub fn main_loop() !void {
+fn child_thread(conn: std.net.Server.Connection) !void {
+    defer conn.stream.close();
+
+    const tid = std.Thread.getCurrentId();
+
     var buf: [1024]u8 = undefined;
+    const len = try conn.stream.read(&buf);
+    log.info("tid = {any}, client data: len = {}", .{ tid, len });
+}
+
+pub fn main_loop() !void {
     while (true) {
         const conn = try server.accept();
-        defer conn.stream.close();
-
         log.info("client connected: {any}", .{conn.address});
 
-        const len = try conn.stream.read(&buf);
-
-        log.info("client data: len = {}, content = {any}", .{ len, buf[0..len] });
+        const t = try std.Thread.spawn(.{}, child_thread, .{conn});
+        t.detach();
     }
 }
