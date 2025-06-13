@@ -59,6 +59,8 @@ fn collect_childs() !void {
 
 /// accept new connections and dispatch them through coroutine worker
 pub fn main_loop() !void {
+    defer server.close() catch unreachable;
+
     const allocator = runtime.runtime.allocator;
 
     childs = try Pool(Child).init(allocator, CLIENT_COUNT, PoolKind.grow);
@@ -70,7 +72,8 @@ pub fn main_loop() !void {
     defer released.deinit(allocator);
 
     // create a coroutine to collect childs coroutines
-    _ = try ziro.xasync(collect_coro, .{}, null);
+    var coro = try ziro.xasync(collect_coro, .{}, null);
+    defer coro.deinit();
 
     while (true) {
         const client_conn = try server.accept();
