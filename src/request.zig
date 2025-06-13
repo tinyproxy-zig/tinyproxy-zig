@@ -4,6 +4,7 @@ const ziro = @import("ziro");
 const aio = ziro.asyncio;
 
 const Connection = @import("connection.zig").Connection;
+const runtime = @import("runtime.zig");
 const socket = @import("socket.zig");
 
 const log = std.log.scoped(.@"tinyproxy/request");
@@ -21,8 +22,12 @@ const HTTP_RESPONSE = "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Leng
 pub fn handle_connection(conn: *Connection) !void {
     defer conn.client_conn.close() catch unreachable;
 
+    const config = runtime.runtime.config;
+
     socket.get_peer_addr(conn.client_conn.tcp.fd, &conn.client_addr);
     log.info("connect (file descriptor: {}): {any}", .{ conn.client_conn.tcp.fd, conn.client_addr });
+
+    try socket.set_socket_timeout(conn.client_conn.tcp.fd, config.idle_timeout);
 
     var buf: [1024]u8 = undefined;
 

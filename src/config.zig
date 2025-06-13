@@ -2,6 +2,7 @@
 pub const Config = struct {
     listen: []const u8 = "127.0.0.1",
     port: u16 = 9999,
+    idle_timeout: u32 = 60 * 10, // 10 minutes of no activity
     max_clients: usize = 100,
 
     const Self = @This();
