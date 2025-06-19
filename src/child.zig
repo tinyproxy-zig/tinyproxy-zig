@@ -49,10 +49,11 @@ fn collect_childs() !void {
     var iter = childs.iterator();
     while (iter.next()) |child| {
         if (child.done) {
+            child.conn.deinit();
+            child.coro.deinit();
             const index = child.index;
             childs.release(index);
             try released.append(runtime.runtime.allocator, index);
-            child.coro.deinit();
         }
     }
 }

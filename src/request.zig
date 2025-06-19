@@ -4,6 +4,7 @@ const ziro = @import("ziro");
 const aio = ziro.asyncio;
 
 const Connection = @import("connection.zig").Connection;
+const network = @import("network.zig");
 const socket = @import("socket.zig");
 
 const log = std.log.scoped(.@"tinyproxy/request");
@@ -18,6 +19,7 @@ pub const Request = struct {
 
 const HTTP_RESPONSE = "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 13\r\nContent-Type: text/plain\r\n\r\nHello World\r\n";
 
+/// This is the main drive for each connection.
 pub fn handle_connection(conn: *Connection) !void {
     defer conn.client_conn.close() catch unreachable;
 
@@ -26,7 +28,15 @@ pub fn handle_connection(conn: *Connection) !void {
 
     try socket.set_socket_timeout(conn.client_conn.tcp.fd);
 
-    // TODO: read_request_line
+    // TODO: connection_loops()
+
+    // TODO: check_acl()
+
+    read_request_line(conn) catch {
+        return;
+    };
+
+    // TODO: get all headers from the client in a big hash
 
     var buf: [1024]u8 = undefined;
 
@@ -41,4 +51,22 @@ pub fn handle_connection(conn: *Connection) !void {
             return;
         };
     }
+}
+
+// Read the first line from the client (the request line for HTTP connections).
+// The request line is allocated from the heap,
+// but it must be freed in another function.
+fn read_request_line(conn: *Connection) !void {
+    const fd = conn.client_conn.tcp.fd;
+    const len = network.readline(fd, &conn.request_line) catch |e| {
+        log.err("read_request_line error: {any}", .{e});
+        return;
+    };
+    if (len == 0) {
+        log.err("read_request_line: Client (file descriptor: {} closed socket before read)", .{fd});
+    }
+
+    // TODO: handle when the line only contains '\n'
+
+    log.info("request (file descriptor {}): {s}", .{ fd, conn.request_line });
 }

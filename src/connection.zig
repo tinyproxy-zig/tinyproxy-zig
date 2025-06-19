@@ -3,6 +3,8 @@ const std = @import("std");
 const ziro = @import("ziro");
 const aio = ziro.asyncio;
 
+const runtime = @import("runtime.zig");
+
 pub const Connection = struct {
     client_conn: aio.TCP = undefined,
     server_conn: aio.TCP = undefined,
@@ -31,7 +33,9 @@ pub const Connection = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
-        self.allocator.destroy(self);
+    pub fn deinit(self: Self) void {
+        const allocator = runtime.runtime.allocator;
+
+        allocator.free(self.request_line);
     }
 };
