@@ -53,9 +53,8 @@ pub fn handle_connection(conn: *Connection) !void {
     }
 }
 
-// Read the first line from the client (the request line for HTTP connections).
-// The request line is allocated from the heap,
-// but it must be freed in another function.
+/// Read the first line from the client (the request line for HTTP connections).
+/// The request line is allocated from the heap, ownership has been transfered to the caller.
 fn read_request_line(conn: *Connection) !void {
     const fd = conn.client_conn.tcp.fd;
     const len = network.readline(fd, &conn.request_line) catch |e| {
