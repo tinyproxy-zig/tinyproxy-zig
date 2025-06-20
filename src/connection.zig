@@ -33,11 +33,13 @@ pub const Connection = struct {
         };
     }
 
-    pub fn deinit(self: Self) void {
+    pub fn deinit(self: *Self) void {
         const allocator = runtime.runtime.allocator;
 
         if (self.request_line.len > 0) {
             allocator.free(self.request_line);
         }
+
+        allocator.destroy(self);
     }
 };

@@ -23,8 +23,7 @@ var released: std.ArrayListUnmanaged(usize) = undefined;
 
 const Child = struct {
     coro: ziro.Frame = undefined,
-    conn: Connection,
-    done: bool = false,
+    conn: *Connection = undefined,
     index: usize,
 };
 
@@ -48,9 +47,9 @@ fn collect_coro() !void {
 fn collect_childs() !void {
     var iter = childs.iterator();
     while (iter.next()) |child| {
-        if (child.done) {
-            child.conn.deinit();
+        if (child.coro.status == .Done) {
             child.coro.deinit();
+            child.conn.deinit();
             const index = child.index;
             childs.release(index);
             try released.append(runtime.runtime.allocator, index);
@@ -87,10 +86,12 @@ pub fn main_loop() !void {
             }
         };
 
+        const conn = try allocator.create(Connection);
+        conn.* = Connection.init(client_conn);
+
         const child = childs.get_ptr(index);
         child.* = .{
-            .done = false,
-            .conn = Connection.init(client_conn),
+            .conn = conn,
             .index = index,
         };
 
@@ -100,10 +101,8 @@ pub fn main_loop() !void {
 }
 
 fn child_coro(child: *Child) !void {
-    defer child.done = true;
-
     child.coro = ziro.xframe();
 
     // dispatch request
-    try request.handle_connection(&child.conn);
+    try request.handle_connection(child.conn);
 }
