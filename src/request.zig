@@ -64,6 +64,7 @@ fn read_request_line(conn: *Connection) !void {
     };
     if (len == 0) {
         log.err("read_request_line: Client (file descriptor: {} closed socket before read)", .{fd});
+        return;
     }
 
     // TODO: handle when the line only contains '\n'

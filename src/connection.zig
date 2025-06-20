@@ -9,7 +9,7 @@ pub const Connection = struct {
     client_conn: aio.TCP = undefined,
     server_conn: aio.TCP = undefined,
     /// the request line (first line) from the client
-    request_line: []u8 = undefined,
+    request_line: []u8 = &.{},
     /// A Content-Length value from the remote server
     content_length: struct {
         client: u64,
@@ -36,6 +36,8 @@ pub const Connection = struct {
     pub fn deinit(self: Self) void {
         const allocator = runtime.runtime.allocator;
 
-        allocator.free(self.request_line);
+        if (self.request_line.len > 0) {
+            allocator.free(self.request_line);
+        }
     }
 };
