@@ -37,6 +37,14 @@ pub fn handle_connection(conn: *Connection) !void {
     };
 
     // TODO: get all headers from the client in a big hash
+    // TODO: basic auth
+    // TODO: add custom headers
+    // TODO: (*) call process_request()
+    // TODO: upstream
+    // TODO: (*) call process_client_headers()
+    // TODO: (*) call process_server_headers() OR send_connect_method_response()
+    // TODO: (*) call relay_connection()
+    // TODO: (*) final log: closed connection between local client (fd:{}) and remove server (fd:{})
 
     var buf: [1024]u8 = undefined;
 
