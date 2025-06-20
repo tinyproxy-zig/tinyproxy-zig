@@ -63,7 +63,7 @@ fn read_request_line(conn: *Connection) !void {
         return;
     };
     if (len == 0) {
-        log.err("read_request_line: Client (file descriptor: {} closed socket before read)", .{fd});
+        log.err("read_request_line: client (file descriptor: {}) closed socket before read", .{fd});
         return;
     }
 
