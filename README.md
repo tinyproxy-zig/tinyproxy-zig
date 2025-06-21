@@ -1,12 +1,12 @@
-# tinyproxy in zig
+# Rewrite Tinyproxy in zig
 
 Tinyproxy is a lightweight http(s) proxy daemon.
-Rewrite tinyproxy in zig for fun.
+See https://github.com/tinyproxy/tinyproxy .
 
 ### Design
 
-- single thread model: start coroutine for each connection
-- ziro based coroutine, libxev based async io
+- single thread model: start a coroutine for each connection
+- use ziro coroutine engine, libxev based async io
 
 ### Features
 
@@ -15,7 +15,7 @@ Rewrite tinyproxy in zig for fun.
 - [ ] transparent proxy
 - [ ] reverse proxy
 - [ ] filter
-- [ ] custom header
+- [ ] custom headers
 - [ ] acl
 - [ ] basic auth
 - [ ] stats

@@ -1,7 +1,7 @@
 .{
-    .name = .tinyproxy_zig,
+    .name = .tinyproxy,
     .version = "0.0.0",
-    .fingerprint = 0x1546a724868bc14b,
+    .fingerprint = 0xc61668f517752cfa,
     .minimum_zig_version = "0.14.0",
 
     .dependencies = .{

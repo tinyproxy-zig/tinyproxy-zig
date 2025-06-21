@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("ziro", ziro_mod);
 
     const exe = b.addExecutable(.{
-        .name = "tinyproxy_zig",
+        .name = "tinyproxy",
         .root_module = exe_mod,
     });
 
