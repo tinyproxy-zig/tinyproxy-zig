@@ -24,6 +24,9 @@ pub fn handle_connection(conn: *Connection) !void {
     defer conn.client_conn.close() catch unreachable;
 
     socket.get_peer_addr(conn.client_conn.tcp.fd, &conn.client_addr);
+
+    // TODO: BindSame
+
     log.info("connect (file descriptor: {}): {any}", .{ conn.client_conn.tcp.fd, conn.client_addr });
 
     try socket.set_socket_timeout(conn.client_conn.tcp.fd);
@@ -36,11 +39,14 @@ pub fn handle_connection(conn: *Connection) !void {
         return;
     };
 
-    // TODO: get all headers from the client in a big hash
+    // TODO: (*) get_all_headers() from the client in a big hash
     // TODO: basic auth
     // TODO: add custom headers
-    // TODO: (*) call process_request()
-    // TODO: upstream
+    // TODO: (*) call process_request() for METHOD, URL
+    // TODO: (*) establish connection to remote
+    // TODO: connect upstream
+    // TODO: (*) connect directly
+    // TODO: connect securely (through CONNECT)
     // TODO: (*) call process_client_headers()
     // TODO: (*) call process_server_headers() OR send_connect_method_response()
     // TODO: (*) call relay_connection()
