@@ -7,6 +7,7 @@ const Connection = @import("connection.zig").Connection;
 const network = @import("network.zig");
 const runtime = @import("runtime.zig");
 const socket = @import("socket.zig");
+const text = @import("text.zig");
 
 const log = std.log.scoped(.@"tinyproxy/request");
 
@@ -24,19 +25,38 @@ inline fn checkLWS(header: []const u8) bool {
 /// Read the first line from the client (the request line for HTTP connections).
 /// The request line is allocated from the heap, ownership has been transfered to the caller.
 fn read_request_line(conn: *Connection) !void {
+    const allocator = runtime.runtime.allocator;
     const fd = conn.client_conn.tcp.fd;
-    const len = network.readline(fd, &conn.request_line) catch |e| {
-        log.err("read_request_line error: {any}", .{e});
-        return;
-    };
-    if (len == 0) {
-        log.err("read_request_line: client (file descriptor: {}) closed socket before read", .{fd});
-        return;
+
+    retry: while (true) {
+        const len = network.readline(fd, &conn.request_line) catch |e| {
+            log.err("read_request_line error: {any}", .{e});
+            return;
+        };
+
+        if (len <= 0) {
+            log.err("read_request_line: client (fd: {}) closed socket before read.", .{fd});
+            return;
+        }
+
+        // Strip the new line and carriage return from the string
+        const chars_removed = text.chomp(conn.request_line[0..len]) catch |e| {
+            log.err("chomp error: {any}", .{e});
+            return;
+        };
+
+        // If the number of characters removed is the same as the length then it was a blank line.
+        // Free the buffer and try again (since we're looking for a request line.)
+        if (chars_removed == len) {
+            allocator.free(conn.request_line);
+            continue :retry;
+        }
+
+        // Successfully got a non-blank request line
+        break;
     }
 
-    // TODO: handle when the line only contains '\n'
-
-    log.info("request (file descriptor {}): {s}", .{ fd, conn.request_line });
+    log.info("request (fd: {}): {s}", .{ fd, conn.request_line });
 }
 
 /// Add header to the hashmap, parsing key:value pairs.
@@ -179,7 +199,7 @@ pub fn handle_connection(conn: *Connection) !void {
 
     // TODO: BindSame
 
-    log.info("connect (file descriptor: {}): {any}", .{ conn.client_conn.tcp.fd, conn.client_addr });
+    log.info("connect (fd: {}): {any}", .{ conn.client_conn.tcp.fd, conn.client_addr });
 
     try socket.set_socket_timeout(conn.client_conn.tcp.fd);
 
@@ -192,7 +212,6 @@ pub fn handle_connection(conn: *Connection) !void {
     };
 
     // get all headers from the client in a big hashmap
-
     var headers = std.StringHashMap([]u8).init(allocator);
     defer {
         // Free all allocated keys and values
@@ -207,6 +226,13 @@ pub fn handle_connection(conn: *Connection) !void {
         log.err("get_all_headers error: {any}", .{e});
         return;
     };
+    // TODO: remove below log for headers later
+    {
+        var iterator = headers.iterator();
+        while (iterator.next()) |entry| {
+            log.debug("header: {s}: {s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+        }
+    }
     got_headers = true;
 
     // TODO: basic auth
