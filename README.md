@@ -63,10 +63,10 @@ Proxy will listen on `127.0.0.1:9999` (see `src/config.zig`).
 zig build test
 
 # Test HTTP proxy
-curl -x http://127.0.0.1:9999 http://example.com
+curl -x http://127.0.0.1:9999 http://ipinfo.io/ip
 
 # Test HTTPS tunnel
-curl -x http://127.0.0.1:9999 https://example.com
+curl -x http://127.0.0.1:9999 https://ipinfo.io/ip
 
 # Benchmark
 wrk -c 100 -t 4 http://127.0.0.1:9999
