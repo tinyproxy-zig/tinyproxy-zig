@@ -1,108 +1,52 @@
 const std = @import("std");
+const zio = @import("zio");
 
-const ziro = @import("ziro");
-const aio = ziro.asyncio;
-
-const Connection = @import("connection.zig").Connection;
-const Pool = @import("pool.zig").Pool;
-const PoolKind = @import("pool.zig").PoolKind;
 const request = @import("request.zig");
-const runtime = @import("runtime.zig");
-const socket = @import("socket.zig");
 
 const log = std.log.scoped(.@"tinyproxy/child");
-const CLIENT_COUNT: usize = 128;
 
-/// a listening socket server
-/// TODO: will be a list of listening socket servers
-var server: aio.TCP = undefined;
+var server: zio.net.Server = undefined;
 
-/// a list of `Child` objects
-var childs: Pool(Child) = undefined;
-var released: std.ArrayListUnmanaged(usize) = undefined;
-
-const Child = struct {
-    coro: ziro.Frame = undefined,
-    conn: *Connection = undefined,
-    index: usize,
-};
-
-/// create a listening socker server
-/// TODO: move to socket module
-pub fn listen_socket(addr: []const u8, port: u16) !void {
-    const address = try std.net.Address.parseIp(addr, port);
-    server = try aio.TCP.init(runtime.runtime.executor, address);
-    try server.bind(address);
-    try server.listen(1024);
-    log.info("listening on {any}", .{address});
+pub fn listen_socket(rt: *zio.Runtime, addr: []const u8, port: u16) !void {
+    const ip = try zio.net.IpAddress.parseIp(addr, port);
+    server = try ip.listen(rt, .{ .kernel_backlog = 1024 });
+    log.info("listening on {s}:{d}", .{ addr, port });
 }
 
-fn collect_coro() !void {
+pub fn main_loop(rt: *zio.Runtime) !void {
     while (true) {
-        try collect_childs();
-        try aio.sleep(null, 1000 * 5); // sleep 5s
+        const stream = try server.accept(rt);
+        var handle = try rt.spawn(request.handle_connection, .{ rt, stream }, .{});
+        handle.detach(rt);
     }
 }
 
-fn collect_childs() !void {
-    var iter = childs.iterator();
-    while (iter.next()) |child| {
-        if (child.coro.status == .Done) {
-            child.coro.deinit();
-            child.conn.deinit();
-            const index = child.index;
-            childs.release(index);
-            try released.append(runtime.runtime.allocator, index);
+pub fn accept_once(rt: *zio.Runtime) !void {
+    const stream = try server.accept(rt);
+    stream.close(rt);
+}
+
+test "accepts one connection" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const rt = try zio.Runtime.init(gpa.allocator(), .{ .num_executors = 1 });
+    defer rt.deinit();
+
+    var ready = zio.ResetEvent.init;
+
+    var server_task = try rt.spawn(struct {
+        fn run(rt2: *zio.Runtime, ready2: *zio.ResetEvent) !void {
+            try listen_socket(rt2, "127.0.0.1", 18080);
+            ready2.set();
+            try accept_once(rt2);
         }
-    }
-}
+    }.run, .{ rt, &ready }, .{});
 
-/// accept new connections and dispatch them through coroutine worker
-pub fn main_loop() !void {
-    defer server.close() catch unreachable;
+    try ready.wait(rt);
 
-    const allocator = runtime.runtime.allocator;
+    const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18080);
+    var stream = try addr.connect(rt);
+    stream.close(rt);
 
-    childs = try Pool(Child).init(allocator, CLIENT_COUNT, PoolKind.grow);
-    errdefer childs.deinit();
-    defer childs.deinit();
-
-    released = try std.ArrayListUnmanaged(usize).initCapacity(allocator, CLIENT_COUNT);
-    errdefer released.deinit(allocator);
-    defer released.deinit(allocator);
-
-    // create a coroutine to collect childs coroutines
-    var coro = try ziro.xasync(collect_coro, .{}, null);
-    defer coro.deinit();
-
-    while (true) {
-        const client_conn = try server.accept();
-
-        const index = blk: {
-            if (released.pop()) |index| {
-                break :blk childs.borrow_assume_unset(index);
-            } else {
-                break :blk try childs.borrow();
-            }
-        };
-
-        const conn = try allocator.create(Connection);
-        conn.* = Connection.init(client_conn);
-
-        const child = childs.get_ptr(index);
-        child.* = .{
-            .conn = conn,
-            .index = index,
-        };
-
-        // create coroutine to handle new connection
-        _ = try ziro.xasync(child_coro, .{child}, null);
-    }
-}
-
-fn child_coro(child: *Child) !void {
-    child.coro = ziro.xframe();
-
-    // dispatch request
-    try request.handle_connection(child.conn);
+    try server_task.join(rt);
 }

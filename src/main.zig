@@ -1,18 +1,11 @@
 const std = @import("std");
 
-const ziro = @import("ziro");
-const aio = ziro.asyncio;
+const zio = @import("zio");
 
 const child = @import("child.zig");
-const config = @import("config.zig");
-const Config = config.Config;
-const runtime = @import("runtime.zig");
-const Runtime = @import("runtime.zig").Runtime;
-const RuntimeOptions = @import("runtime.zig").RuntimeOptions;
-
-const log = std.log.scoped(.tinyproxy);
-
-const STACK_SIZE = 1024 * 64; // default stack size for coroutine, in KB
+const Config = @import("config.zig").Config;
+const runtime_mod = @import("runtime.zig");
+const Runtime = runtime_mod.Runtime;
 
 pub fn main() !void {
     // init allocator
@@ -22,21 +15,16 @@ pub fn main() !void {
     defer _ = dbgalloc.deinit();
     const allocator = dbgalloc.allocator();
 
-    // init runtime
     var conf = Config.init();
-    const options = RuntimeOptions{
-        .stack_size = STACK_SIZE,
-        .config = &conf,
-    };
-    var rt = try Runtime.init(allocator, options);
+    var rt = try Runtime.init(allocator, .{ .config = &conf });
     defer rt.deinit();
 
-    // run main coroutine
-    try aio.run(rt.executor, main_coro, .{}, null);
+    var handle = try rt.zio_rt.spawn(main_task, .{ rt.zio_rt }, .{});
+    try handle.join(rt.zio_rt);
 }
 
-fn main_coro() !void {
-    const conf = runtime.runtime.config.*;
-    try child.listen_socket(conf.listen, conf.port);
-    try child.main_loop();
+fn main_task(rt: *zio.Runtime) !void {
+    const conf = runtime_mod.runtime.config.*;
+    try child.listen_socket(rt, conf.listen, conf.port);
+    try child.main_loop(rt);
 }

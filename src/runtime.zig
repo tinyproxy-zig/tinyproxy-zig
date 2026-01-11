@@ -1,7 +1,6 @@
 const std = @import("std");
 
-const ziro = @import("ziro");
-const aio = ziro.asyncio;
+const zio = @import("zio");
 
 const Config = @import("config.zig").Config;
 
@@ -10,41 +9,31 @@ pub threadlocal var runtime: Runtime = undefined;
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
-    executor: *aio.Executor,
+    zio_rt: *zio.Runtime,
     config: *Config,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, options: RuntimeOptions) !Self {
-        const executor = try allocator.create(aio.Executor);
-
-        executor.* = try aio.Executor.init(allocator);
-
-        aio.initEnv(.{
-            .executor = executor,
-            .stack_allocator = allocator,
-            .default_stack_size = options.stack_size,
-        });
-
-        runtime = .{
-            .allocator = allocator,
-            .executor = executor,
-            .config = options.config,
-        };
-
+        const zrt = try zio.Runtime.init(allocator, .{ .num_executors = 1 });
+        runtime = .{ .allocator = allocator, .zio_rt = zrt, .config = options.config };
         return runtime;
     }
 
     pub fn deinit(self: *Self) void {
-        self.executor.deinit(self.allocator);
-        self.allocator.destroy(self.executor);
+        self.zio_rt.deinit();
     }
 };
 
-// default stack size 2MB
-const default_stack_size: usize = 2 * 1024 * 1024;
-
 pub const RuntimeOptions = struct {
-    stack_size: usize = default_stack_size,
     config: *Config,
 };
+
+test "runtime init and deinit" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    var conf = Config.init();
+    var rt = try Runtime.init(gpa.allocator(), .{ .config = &conf });
+    defer rt.deinit();
+}

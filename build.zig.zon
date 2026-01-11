@@ -2,12 +2,11 @@
     .name = .tinyproxy,
     .version = "0.0.0",
     .fingerprint = 0xc61668f517752cfa,
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.15.2",
 
     .dependencies = .{
-        .ziro = .{
-            .url = "git+https://github.com/dacheng-zig/ziro#254b79b7a4f2993ac0add63680e8e1f4fac17bf1",
-            .hash = "ziro-0.0.0-gJN_2Ed2AQDAWXqyr2OJ_BX0ettNDPwaVCGHppdmQtm1",
+        .zio = .{
+            .path = "../zio",
         },
     },
 
