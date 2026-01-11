@@ -4,7 +4,6 @@ const posix = std.posix;
 const native_os = builtin.os.tag;
 
 const darwin = @import("darwin.zig");
-const runtime = @import("runtime.zig");
 
 const SEGMENT_LEN = 512;
 const MAXIMUM_BUFFER_LENGTH = 128 * 1024;
@@ -26,16 +25,14 @@ const ReadLines = struct {
 /// until a newline is found. The returned line includes the terminating
 /// newline character and is NULL terminated.
 ///
-/// The buffer is allocated on the heap using allocator from runtime.
+/// The buffer is allocated on the heap using the provided allocator.
 /// The caller is responsible for freeing this memory.
 ///
 /// Returns:
 ///   - Length of buffer on success (not including NULL termination)
 ///   - 0 if socket was closed
 ///   - error if buffer size limit exceeded, or other socket errors
-pub fn readline(sock: posix.socket_t, whole_buffer: *[]u8) !usize {
-    const allocator = runtime.runtime.allocator;
-
+pub fn readline(allocator: std.mem.Allocator, sock: posix.socket_t, whole_buffer: *[]u8) !usize {
     var buffer: [SEGMENT_LEN]u8 = undefined;
     var whole_buffer_len: usize = 0;
 

@@ -3,7 +3,7 @@ const mem = std.mem;
 const net = std.net;
 const posix = std.posix;
 
-const runtime = @import("runtime.zig");
+const Config = @import("config.zig").Config;
 
 pub fn opensock(host: []u8, port: u16, bind_to: []u8) void {
     _ = host;
@@ -18,11 +18,9 @@ pub fn get_peer_addr(sock: posix.socket_t, addr: *net.Address) void {
 }
 
 /// set the socket send and receive timeout
-pub fn set_socket_timeout(sock: posix.socket_t) !void {
-    const conf = runtime.runtime.config;
-
+pub fn set_socket_timeout(sock: posix.socket_t, idle_timeout: u32) !void {
     var timespec: posix.timespec = .{
-        .sec = conf.idle_timeout,
+        .sec = idle_timeout,
         .nsec = 0,
     };
     try posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.SNDTIMEO, mem.asBytes(&timespec));

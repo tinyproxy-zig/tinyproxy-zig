@@ -33,19 +33,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const runtime_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/runtime.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    runtime_test_mod.addImport("zio", zio_mod);
-
-    const runtime_tests = b.addTest(.{
-        .name = "runtime-tests",
-        .root_module = runtime_test_mod,
-    });
-    const runtime_run = b.addRunArtifact(runtime_tests);
-
     const child_test_mod = b.createModule(.{
         .root_source_file = b.path("src/child.zig"),
         .target = target,
@@ -123,7 +110,7 @@ pub fn build(b: *std.Build) void {
     const tinyproxy_run = b.addRunArtifact(tinyproxy_tests);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&runtime_run.step);
+
     test_step.dependOn(&child_run.step);
     test_step.dependOn(&buffer_run.step);
     test_step.dependOn(&proxy_run.step);
