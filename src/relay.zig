@@ -43,7 +43,7 @@ test "relay copies both directions" {
     try relay_task.join(rt);
 }
 
-fn copy_one(rt: *zio.Runtime, src: zio.net.Stream, dst: zio.net.Stream) !void {
+pub fn copy_one(rt: *zio.Runtime, src: zio.net.Stream, dst: zio.net.Stream) !void {
     var from = src;
     var to = dst;
     var buf: [8192]u8 = undefined;

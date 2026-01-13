@@ -2,6 +2,7 @@ const std = @import("std");
 const zio = @import("zio");
 
 const buffer = @import("buffer.zig");
+const http = @import("http.zig");
 const relay = @import("relay.zig");
 
 const HTTP_PORT: u16 = 80;
@@ -22,52 +23,13 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream) !void {
     var reader = buffer.LineReader.init(rt.allocator, 8192);
     defer reader.deinit();
 
-    var header_lines = std.ArrayList([]u8).empty;
-    defer {
-        for (header_lines.items) |line| {
-            rt.allocator.free(line);
-        }
-        header_lines.deinit(rt.allocator);
-    }
-
-    var headers = std.StringHashMap([]u8).init(rt.allocator);
-    defer headers.deinit();
-
     const req_line = try reader.readLine(rt, &stream);
     defer rt.allocator.free(req_line);
 
-    while (true) {
-        const line = try reader.readLine(rt, &stream);
-        const header_line = std.mem.trimRight(u8, line, "\r\n");
-        if (header_line.len == 0) {
-            rt.allocator.free(line);
-            break;
-        }
+    var message = try http.read_headers(rt.allocator, &reader, rt, &stream);
+    defer message.deinit();
 
-        var skip_forward = false;
-        if (std.mem.indexOfScalar(u8, header_line, ':')) |pos| {
-            const name = std.mem.trim(u8, header_line[0..pos], " \t");
-            const value = std.mem.trim(u8, header_line[pos + 1 ..], " \t");
-
-            if (std.ascii.eqlIgnoreCase(name, "Host")) {
-                try headers.put("Host", @constCast(value));
-            }
-
-            if (std.ascii.eqlIgnoreCase(name, "Proxy-Connection")) {
-                skip_forward = true;
-            }
-        }
-
-        if (skip_forward) {
-            rt.allocator.free(line);
-            continue;
-        }
-
-        try header_lines.append(rt.allocator, line);
-    }
-
-    const req_line_trim = std.mem.trimRight(u8, req_line, "\r\n");
-    const req = try process_request_line(rt.allocator, req_line_trim, &headers);
+    const req = try process_request_line(rt.allocator, req_line, &message.headers);
     defer free_request(rt.allocator, req);
 
     const addr = zio.net.IpAddress.parseIp(req.host, req.port) catch blk: {
@@ -81,25 +43,31 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream) !void {
 
     if (std.ascii.eqlIgnoreCase(req.method, "CONNECT")) {
         try stream.writeAll(rt, "HTTP/1.1 200 Connection Established\r\n\r\n");
+        _ = try reader.flush_to(rt, &upstream);
         try relay.copy_bidi(rt, stream, upstream);
         return;
     }
 
-    const protocol = std.mem.trimRight(u8, req.protocol, "\r\n");
     const request_line = try std.fmt.allocPrint(rt.allocator, "{s} {s} {s}\r\n", .{
         req.method,
         req.path,
-        protocol,
+        req.protocol,
     });
     defer rt.allocator.free(request_line);
 
     try upstream.writeAll(rt, request_line);
-    for (header_lines.items) |line| {
-        try upstream.writeAll(rt, line);
+    for (message.header_list.items) |header| {
+        if (std.mem.eql(u8, header.name, "proxy-connection")) continue;
+        try upstream.writeAll(rt, header.name);
+        try upstream.writeAll(rt, ": ");
+        try upstream.writeAll(rt, header.value);
+        try upstream.writeAll(rt, "\r\n");
     }
     try upstream.writeAll(rt, "\r\n");
 
-    try relay.copy_bidi(rt, stream, upstream);
+    var body_reader = message.body_reader();
+    try body_reader.copy_raw_to(&reader, rt, &stream, &upstream);
+    try relay.copy_one(rt, upstream, stream);
 }
 
 fn strip_username_password(host: []u8) usize {
@@ -158,34 +126,31 @@ fn extract_url(allocator: std.mem.Allocator, url: []const u8, default_port: u16,
 pub fn process_request_line(
     allocator: std.mem.Allocator,
     line: []const u8,
-    headers: *std.StringHashMap([]u8),
+    headers: *const std.StringHashMap([]const u8),
 ) !*Request {
-    var parts = std.mem.splitScalar(u8, line, ' ');
-
-    const method_part = parts.next() orelse return error.BadRequest;
-    const url_part = parts.next() orelse return error.BadRequest;
-    const protocol_part = parts.next();
-
+    const req_line = try http.parse_request_line(line);
     const req = try allocator.create(Request);
     errdefer allocator.destroy(req);
 
-    if (protocol_part == null) {
-        if (!std.ascii.eqlIgnoreCase(method_part, "GET")) return error.BadRequest;
-        try extract_url(allocator, url_part, HTTP_PORT, req);
-        req.method = try allocator.dupe(u8, method_part);
-        req.protocol = try allocator.dupe(u8, "HTTP/0.9");
+    const protocol = switch (req_line.version) {
+        .http09 => "HTTP/0.9",
+        .http10 => "HTTP/1.0",
+        .http11 => "HTTP/1.1",
+    };
+
+    if (req_line.version == .http09) {
+        try extract_url(allocator, req_line.uri, HTTP_PORT, req);
+        req.method = try allocator.dupe(u8, req_line.method);
+        req.protocol = try allocator.dupe(u8, protocol);
         return req;
     }
 
-    const protocol = protocol_part.?;
-    if (!std.ascii.startsWithIgnoreCase(protocol, "HTTP/")) return error.BadRequest;
-
-    if (std.ascii.startsWithIgnoreCase(url_part, "http://")) {
-        try extract_url(allocator, url_part[7..], HTTP_PORT, req);
-    } else if (std.ascii.eqlIgnoreCase(method_part, "CONNECT")) {
-        try extract_url(allocator, url_part, HTTPS_PORT, req);
+    if (std.ascii.startsWithIgnoreCase(req_line.uri, "http://")) {
+        try extract_url(allocator, req_line.uri[7..], HTTP_PORT, req);
+    } else if (std.ascii.eqlIgnoreCase(req_line.method, "CONNECT")) {
+        try extract_url(allocator, req_line.uri, HTTPS_PORT, req);
     } else {
-        const host_header = headers.get("Host") orelse headers.get("host") orelse return error.BadRequest;
+        const host_header = headers.get("host") orelse return error.BadRequest;
         var host_parts = std.mem.splitScalar(u8, host_header, ':');
         const host_part = host_parts.next() orelse return error.BadRequest;
         const port_str = host_parts.next();
@@ -199,10 +164,10 @@ pub fn process_request_line(
 
         try extract_url(allocator, host_port_str, port, req);
         allocator.free(req.path);
-        req.path = try allocator.dupe(u8, url_part);
+        req.path = try allocator.dupe(u8, req_line.uri);
     }
 
-    req.method = try allocator.dupe(u8, method_part);
+    req.method = try allocator.dupe(u8, req_line.method);
     req.protocol = try allocator.dupe(u8, protocol);
 
     return req;
@@ -217,7 +182,7 @@ pub fn free_request(allocator: std.mem.Allocator, req: *Request) void {
 }
 
 test "process_request with absolute URL" {
-    var headers = std.StringHashMap([]u8).init(std.testing.allocator);
+    var headers = std.StringHashMap([]const u8).init(std.testing.allocator);
     defer headers.deinit();
 
     const req_line = "GET http://example.com/hello HTTP/1.1";

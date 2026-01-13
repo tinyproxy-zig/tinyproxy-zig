@@ -5,6 +5,18 @@
 **tinyproxy-zig** is a Zig implementation of the tinyproxy HTTP/HTTPS proxy daemon,
 built on top of the zio coroutine and async I/O framework.
 
+### Important: Rewrite Guidelines
+
+This project is a **rewrite of tinyproxy in Zig**. When implementing features:
+
+1. **Maintain Functional Parity**: Keep the same functionality as the original tinyproxy C implementation. Do not add, remove, or change behavior unless explicitly discussed.
+
+2. **Idiomatic Zig Implementation**: While functionality must match, the implementation should be native Zig - use Zig idioms, error handling patterns, and standard library conventions rather than direct C-to-Zig translation.
+
+3. **Preserve Module Structure**: Keep the same (or similar) module/file structure as the original tinyproxy. Each C source file should have a corresponding Zig module with equivalent responsibilities.
+
+**Reference**: Always consult `../../tinyproxy/src/` for the original C implementation when implementing new features or debugging behavior differences.
+
 ## Tech Stack
 
 - **Language**: Zig 0.15.2
