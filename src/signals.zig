@@ -1,0 +1,148 @@
+//! Signal Handler Module for tinyproxy-zig
+//!
+//! Uses POSIX signal handlers with the self-pipe trick to wake up the accept loop.
+
+const std = @import("std");
+const builtin = @import("builtin");
+
+/// Signal flags
+var reload_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var rotate_log_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var shutdown_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+/// Wakeup pipe for self-pipe trick
+var wakeup_pipe: [2]std.posix.fd_t = undefined;
+
+pub fn shouldReload() bool {
+    return reload_flag.swap(false, .seq_cst);
+}
+
+pub fn shouldRotateLog() bool {
+    return rotate_log_flag.swap(false, .seq_cst);
+}
+
+pub fn shouldShutdown() bool {
+    return shutdown_flag.load(.acquire);
+}
+
+pub fn requestReload() void {
+    reload_flag.store(true, .seq_cst);
+}
+
+pub fn requestRotateLog() void {
+    rotate_log_flag.store(true, .seq_cst);
+}
+
+/// Get the read end of the wakeup pipe for use with select/poll
+pub fn wakeupFd() std.posix.fd_t {
+    return wakeup_pipe[0];
+}
+
+/// Setup signal handlers and wakeup pipe
+pub fn setup() !void {
+    if (builtin.os.tag == .windows) {
+        return; // Not supported on Windows
+    }
+
+    // Create pipe for self-pipe trick
+    wakeup_pipe = try std.posix.pipe();
+
+    // Set write end to non-blocking (O_NONBLOCK = 0x0004 is standardized)
+    _ = std.posix.fcntl(wakeup_pipe[1], std.posix.F.SETFL, 0x0004) catch {};
+
+    const empty_mask = std.posix.sigemptyset();
+
+    // SIGHUP - Reload configuration
+    const sighup_action = std.posix.Sigaction{
+        .handler = .{ .handler = handleSighup },
+        .mask = empty_mask,
+        .flags = 0, // Don't use SA_RESTART so syscalls can be interrupted
+    };
+    std.posix.sigaction(std.posix.SIG.HUP, &sighup_action, null);
+
+    // SIGUSR1 - Rotate log file
+    const sigusr1_action = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigusr1 },
+        .mask = empty_mask,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.USR1, &sigusr1_action, null);
+
+    // SIGTERM - Graceful shutdown
+    const sigterm_action = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigterm },
+        .mask = empty_mask,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TERM, &sigterm_action, null);
+
+    // SIGINT - Interrupt (Ctrl+C)
+    const sigint_action = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigterm },
+        .mask = empty_mask,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &sigint_action, null);
+
+    // Ignore SIGPIPE
+    const sigpipe_action = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = empty_mask,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &sigpipe_action, null);
+}
+
+/// Drain the wakeup pipe (call after select/poll indicates it's readable)
+pub fn drainWakeupPipe() void {
+    var buf: [16]u8 = undefined;
+    while (true) {
+        const n = std.posix.read(wakeup_pipe[0], &buf) catch |err| switch (err) {
+            error.WouldBlock => return,
+            else => return,
+        };
+        if (n == 0) return;
+    }
+}
+
+/// Cleanup signal handlers
+pub fn cleanup() void {
+    if (builtin.os.tag == .windows) return;
+    std.posix.close(wakeup_pipe[0]);
+    std.posix.close(wakeup_pipe[1]);
+}
+
+fn writeWakeup() void {
+    _ = std.posix.write(wakeup_pipe[1], &[_]u8{1}) catch {};
+}
+
+fn handleSighup(_: c_int) callconv(.c) void {
+    reload_flag.store(true, .seq_cst);
+    writeWakeup();
+}
+
+fn handleSigusr1(_: c_int) callconv(.c) void {
+    rotate_log_flag.store(true, .seq_cst);
+    writeWakeup();
+}
+
+fn handleSigterm(_: c_int) callconv(.c) void {
+    shutdown_flag.store(true, .seq_cst);
+    writeWakeup();
+}
+
+test "signal flags" {
+    reload_flag.store(false, .seq_cst);
+    try std.testing.expect(!shouldReload());
+
+    requestReload();
+    try std.testing.expect(shouldReload());
+    try std.testing.expect(!shouldReload());
+
+    rotate_log_flag.store(false, .seq_cst);
+    try std.testing.expect(!shouldRotateLog());
+
+    requestRotateLog();
+    try std.testing.expect(shouldRotateLog());
+    try std.testing.expect(!shouldRotateLog());
+}

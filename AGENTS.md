@@ -31,6 +31,11 @@ This project is a **rewrite of tinyproxy in Zig**. When implementing features:
 - Naming: `snake_case` for functions/variables, `PascalCase` for types
 - Documentation: use `///` doc comments for public APIs
 
+## Workspace Policy
+
+- Do not create or use git worktrees
+- Make all changes in the main workspace
+
 ## Architecture
 
 - **Single-threaded coroutine model**: one coroutine per connection
@@ -51,9 +56,9 @@ This project is a **rewrite of tinyproxy in Zig**. When implementing features:
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| Phase 1 | Configuration, Logging | 🚧 In Progress |
-| Phase 2 | HTTP Enhancement, Headers, Anonymous | Not Started |
-| Phase 3 | ACL, Auth, Filter, Connect Ports | Not Started |
+| Phase 1 | Configuration, Logging | 🚧 Partial (struct done, file parsing pending) |
+| Phase 2 | HTTP Enhancement, Headers, Anonymous | ✅ Done (headers, anonymous integrated) |
+| Phase 3 | ACL, Auth, Filter, Connect Ports | 🚧 Partial (connect ports done) |
 | Phase 4 | Upstream, Reverse, Transparent Proxy | Not Started |
 | Phase 5 | Stats, Signals, Daemon, Error Pages | Not Started |
 

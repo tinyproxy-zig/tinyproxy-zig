@@ -92,7 +92,7 @@ pub const BodyReader = struct {
                     const to_read = @min(remaining, buf.len);
                     const n = try reader.read(rt, stream, buf[0..to_read]);
                     if (n == 0) return error.EndOfStream;
-                    try writer.writeAll(rt, buf[0..n]);
+                    try writer.writeAll(rt, buf[0..n], .none);
                     remaining -= n;
                 }
                 self.remaining = 0;
@@ -102,7 +102,7 @@ pub const BodyReader = struct {
                 while (true) {
                     const size_line = try reader.readLine(rt, stream);
                     defer reader.allocator.free(size_line);
-                    try writer.writeAll(rt, size_line);
+                    try writer.writeAll(rt, size_line, .none);
 
                     const size_trim = std.mem.trimRight(u8, size_line, "\r\n");
                     const semi = std.mem.indexOfScalar(u8, size_trim, ';') orelse size_trim.len;
@@ -114,7 +114,7 @@ pub const BodyReader = struct {
                         while (true) {
                             const trailer = try reader.readLine(rt, stream);
                             defer reader.allocator.free(trailer);
-                            try writer.writeAll(rt, trailer);
+                            try writer.writeAll(rt, trailer, .none);
                             const trailer_trim = std.mem.trimRight(u8, trailer, "\r\n");
                             if (trailer_trim.len == 0) break;
                         }
@@ -125,14 +125,14 @@ pub const BodyReader = struct {
                     while (remaining > 0) {
                         const to_read = @min(remaining, buf.len);
                         try reader.read_exact(rt, stream, buf[0..to_read]);
-                        try writer.writeAll(rt, buf[0..to_read]);
+                        try writer.writeAll(rt, buf[0..to_read], .none);
                         remaining -= to_read;
                     }
 
                     var crlf: [2]u8 = undefined;
                     try reader.read_exact(rt, stream, &crlf);
                     if (!std.mem.eql(u8, &crlf, "\r\n")) return error.InvalidChunk;
-                    try writer.writeAll(rt, &crlf);
+                    try writer.writeAll(rt, &crlf, .none);
                 }
             },
         }
@@ -185,10 +185,15 @@ pub fn read_headers(
         for (name) |*c| c.* = std.ascii.toLower(c.*);
         const value = try allocator.dupe(u8, value_raw);
 
+        // Check header limit BEFORE appending to prevent bypass
+        if (message.header_list.items.len >= MAX_HEADERS) {
+            allocator.free(name);
+            allocator.free(value);
+            return error.TooManyHeaders;
+        }
+
         try message.header_list.append(allocator, .{ .name = name, .value = value });
         try message.headers.put(name, value);
-
-        if (message.header_list.items.len > MAX_HEADERS) return error.TooManyHeaders;
 
         if (std.mem.eql(u8, name, "content-length")) {
             message.content_length = std.fmt.parseInt(usize, value_raw, 10) catch return error.InvalidContentLength;
@@ -252,16 +257,16 @@ fn content_length_server(rt: *zio.Runtime, server: *zio.net.Server) !void {
 test "read content-length body" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const rt = try zio.Runtime.init(gpa.allocator(), .{ .num_executors = 1 });
+    const rt = try zio.Runtime.init(gpa.allocator(), .{ .executors = .exact(1) });
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18082);
     var server = try addr.listen(rt, .{});
     defer server.close(rt);
 
-    var server_task = try rt.spawn(content_length_server, .{ rt, &server }, .{});
+    var server_task = try rt.spawn(content_length_server, .{ rt, &server });
 
-    var client = try addr.connect(rt);
+    var client = try addr.connect(rt, .{});
     defer client.close(rt);
 
     try client.writeAll(
@@ -307,16 +312,16 @@ fn chunked_server(rt: *zio.Runtime, server: *zio.net.Server) !void {
 test "read chunked body" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const rt = try zio.Runtime.init(gpa.allocator(), .{ .num_executors = 1 });
+    const rt = try zio.Runtime.init(gpa.allocator(), .{ .executors = .exact(1) });
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18083);
     var server = try addr.listen(rt, .{});
     defer server.close(rt);
 
-    var server_task = try rt.spawn(chunked_server, .{ rt, &server }, .{});
+    var server_task = try rt.spawn(chunked_server, .{ rt, &server });
 
-    var client = try addr.connect(rt);
+    var client = try addr.connect(rt, .{});
     defer client.close(rt);
 
     try client.writeAll(

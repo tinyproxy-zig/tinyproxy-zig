@@ -23,7 +23,7 @@ pub const LineReader = struct {
         while (true) {
             if (self.start == self.end) {
                 self.start = 0;
-                self.end = try stream.read(rt, &self.buf);
+                self.end = try stream.read(rt, &self.buf, .none);
                 if (self.end == 0) return error.EndOfStream;
             }
 
@@ -53,7 +53,7 @@ pub const LineReader = struct {
             self.start += n;
             return n;
         }
-        return stream.read(rt, out);
+        return stream.read(rt, out, .none);
     }
 
     pub fn read_exact(self: *LineReader, rt: *zio.Runtime, stream: *zio.net.Stream, out: []u8) !void {
@@ -70,7 +70,7 @@ pub const LineReader = struct {
     pub fn flush_to(self: *LineReader, rt: *zio.Runtime, writer: *zio.net.Stream) !usize {
         if (self.start >= self.end) return 0;
         const buffered = self.buf[self.start..self.end];
-        try writer.writeAll(rt, buffered);
+        try writer.writeAll(rt, buffered, .none);
         const flushed = buffered.len;
         self.start = self.end;
         return flushed;
@@ -98,18 +98,18 @@ fn server_task(rt: *zio.Runtime, ready: *zio.ResetEvent) !void {
 test "line reader reads one line" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const rt = try zio.Runtime.init(gpa.allocator(), .{ .num_executors = 1 });
+    const rt = try zio.Runtime.init(gpa.allocator(), .{ .executors = .exact(1) });
     defer rt.deinit();
 
     var ready = zio.ResetEvent.init;
-    var server = try rt.spawn(server_task, .{ rt, &ready }, .{});
+    var server = try rt.spawn(server_task, .{ rt, &ready });
     try ready.wait(rt);
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18081);
-    var client = try addr.connect(rt);
+    var client = try addr.connect(rt, .{});
     defer client.close(rt);
 
-    try client.writeAll(rt, "GET / HTTP/1.1\r\n");
+    try client.writeAll(rt, "GET / HTTP/1.1\r\n", .none);
     try server.join(rt);
 }
 
@@ -137,18 +137,18 @@ fn server_read_buffered(rt: *zio.Runtime, ready: *zio.ResetEvent) !void {
 test "line reader reads buffered bytes" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const rt = try zio.Runtime.init(gpa.allocator(), .{ .num_executors = 1 });
+    const rt = try zio.Runtime.init(gpa.allocator(), .{ .executors = .exact(1) });
     defer rt.deinit();
 
     var ready = zio.ResetEvent.init;
-    var server = try rt.spawn(server_read_buffered, .{ rt, &ready }, .{});
+    var server = try rt.spawn(server_read_buffered, .{ rt, &ready });
     try ready.wait(rt);
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18084);
-    var client = try addr.connect(rt);
+    var client = try addr.connect(rt, .{});
     defer client.close(rt);
 
-    try client.writeAll(rt, "GET / HTTP/1.1\r\nBODY");
+    try client.writeAll(rt, "GET / HTTP/1.1\r\nBODY", .none);
     try server.join(rt);
 }
 
@@ -175,17 +175,17 @@ fn server_read_exact(rt: *zio.Runtime, ready: *zio.ResetEvent) !void {
 test "line reader read_exact fills buffer" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const rt = try zio.Runtime.init(gpa.allocator(), .{ .num_executors = 1 });
+    const rt = try zio.Runtime.init(gpa.allocator(), .{ .executors = .exact(1) });
     defer rt.deinit();
 
     var ready = zio.ResetEvent.init;
-    var server = try rt.spawn(server_read_exact, .{ rt, &ready }, .{});
+    var server = try rt.spawn(server_read_exact, .{ rt, &ready });
     try ready.wait(rt);
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18085);
-    var client = try addr.connect(rt);
+    var client = try addr.connect(rt, .{});
     defer client.close(rt);
 
-    try client.writeAll(rt, "GET / HTTP/1.1\r\nHELLO");
+    try client.writeAll(rt, "GET / HTTP/1.1\r\nHELLO", .none);
     try server.join(rt);
 }

@@ -4,7 +4,7 @@ const zio = @import("zio");
 test "relay copies both directions" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const rt = try zio.Runtime.init(gpa.allocator(), .{ .num_executors = 1 });
+    const rt = try zio.Runtime.init(gpa.allocator(), .{ .executors = .exact(1) });
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 19001);
@@ -22,20 +22,20 @@ test "relay copies both directions" {
             defer b.close(rt2);
             try copy_bidi(rt2, a, b);
         }
-    }.run, .{ rt, &server, &ready }, .{});
+    }.run, .{ rt, &server, &ready });
 
     try ready.wait(rt);
-    var client_a = try addr.connect(rt);
-    var client_b = try addr.connect(rt);
+    var client_a = try addr.connect(rt, .{});
+    var client_b = try addr.connect(rt, .{});
 
-    try client_a.writeAll(rt, "PING");
+    try client_a.writeAll(rt, "PING", .none);
     var out_a: [4]u8 = undefined;
-    _ = try client_b.read(rt, &out_a);
+    _ = try client_b.read(rt, &out_a, .none);
     try std.testing.expectEqualStrings("PING", &out_a);
 
-    try client_b.writeAll(rt, "PONG");
+    try client_b.writeAll(rt, "PONG", .none);
     var out_b: [4]u8 = undefined;
-    _ = try client_a.read(rt, &out_b);
+    _ = try client_a.read(rt, &out_b, .none);
     try std.testing.expectEqualStrings("PONG", &out_b);
 
     client_a.close(rt);
@@ -48,15 +48,15 @@ pub fn copy_one(rt: *zio.Runtime, src: zio.net.Stream, dst: zio.net.Stream) !voi
     var to = dst;
     var buf: [8192]u8 = undefined;
     while (true) {
-        const n = try from.read(rt, &buf);
+        const n = try from.read(rt, &buf, .none);
         if (n == 0) break;
-        try to.writeAll(rt, buf[0..n]);
+        try to.writeAll(rt, buf[0..n], .none);
     }
 }
 
 pub fn copy_bidi(rt: *zio.Runtime, a: zio.net.Stream, b: zio.net.Stream) !void {
-    var a_to_b = try rt.spawn(copy_one, .{ rt, a, b }, .{});
-    var b_to_a = try rt.spawn(copy_one, .{ rt, b, a }, .{});
+    var a_to_b = try rt.spawn(copy_one, .{ rt, a, b });
+    var b_to_a = try rt.spawn(copy_one, .{ rt, b, a });
     try a_to_b.join(rt);
     try b_to_a.join(rt);
 }

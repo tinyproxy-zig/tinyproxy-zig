@@ -72,8 +72,33 @@ pub fn build(b: *std.Build) void {
     });
     const relay_run = b.addRunArtifact(relay_tests);
 
+    const main_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    main_test_mod.addImport("zio", zio_mod);
+
+    const main_tests = b.addTest(.{
+        .name = "main-tests",
+        .root_module = main_test_mod,
+    });
+    const main_run = b.addRunArtifact(main_tests);
+
+    const conf_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/conf.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const conf_tests = b.addTest(.{
+        .name = "conf-tests",
+        .root_module = conf_test_mod,
+    });
+    const conf_run = b.addRunArtifact(conf_tests);
+
     const config_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/config_parser.zig"),
+        .root_source_file = b.path("src/config.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -84,17 +109,41 @@ pub fn build(b: *std.Build) void {
     });
     const config_run = b.addRunArtifact(config_tests);
 
-    const tinyproxy_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/config_tinyproxy.zig"),
+    const log_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/log.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const tinyproxy_tests = b.addTest(.{
-        .name = "tinyproxy-config-tests",
-        .root_module = tinyproxy_test_mod,
+    const log_tests = b.addTest(.{
+        .name = "log-tests",
+        .root_module = log_test_mod,
     });
-    const tinyproxy_run = b.addRunArtifact(tinyproxy_tests);
+    const log_run = b.addRunArtifact(log_tests);
+
+    const acl_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/acl.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const acl_tests = b.addTest(.{
+        .name = "acl-tests",
+        .root_module = acl_test_mod,
+    });
+    const acl_run = b.addRunArtifact(acl_tests);
+
+    const auth_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/auth.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const auth_tests = b.addTest(.{
+        .name = "auth-tests",
+        .root_module = auth_test_mod,
+    });
+    const auth_run = b.addRunArtifact(auth_tests);
 
     const http_test_mod = b.createModule(.{
         .root_source_file = b.path("src/http.zig"),
@@ -114,7 +163,36 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&child_run.step);
     test_step.dependOn(&proxy_run.step);
     test_step.dependOn(&relay_run.step);
+    test_step.dependOn(&main_run.step);
+    test_step.dependOn(&conf_run.step);
     test_step.dependOn(&config_run.step);
-    test_step.dependOn(&tinyproxy_run.step);
+    test_step.dependOn(&log_run.step);
+    test_step.dependOn(&acl_run.step);
+
+    const signals_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/signals.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const signals_tests = b.addTest(.{
+        .name = "signals-tests",
+        .root_module = signals_test_mod,
+    });
+    const signals_run = b.addRunArtifact(signals_tests);
+    test_step.dependOn(&signals_run.step);
+
+    const upstream_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/upstream.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const upstream_tests = b.addTest(.{
+        .name = "upstream-tests",
+        .root_module = upstream_test_mod,
+    });
+    const upstream_run = b.addRunArtifact(upstream_tests);
+    test_step.dependOn(&upstream_run.step);
+
+    test_step.dependOn(&auth_run.step);
     test_step.dependOn(&http_run.step);
 }

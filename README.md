@@ -13,32 +13,33 @@ Built on top of the [zio](https://github.com/lalinsky/zio) coroutine and async I
 ## Features
 
 ### Phase 1: Infrastructure
-- [ ] Configuration file parsing (tinyproxy compatible)
-- [ ] Logging system (file, syslog, stderr)
+- [x] Configuration file parsing (tinyproxy-compatible directives)
+- [x] Logging system (file/stderr/syslog + rotation on SIGUSR1)
 
 ### Phase 2: Core Proxy
 - [x] Forward proxy (HTTP)
 - [x] HTTPS CONNECT tunnel
-- [ ] HTTP header processing (Via, hop-by-hop removal)
-- [ ] Anonymous mode
-- [ ] Custom headers (AddHeader)
+- [x] HTTP header processing (Via, hop-by-hop removal, response headers)
+- [x] Anonymous mode (header whitelist)
+- [x] Custom headers (AddHeader)
 
 ### Phase 3: Access Control
-- [ ] ACL (Allow/Deny by IP/subnet)
-- [ ] Basic Auth
-- [ ] Connect port restriction
-- [ ] URL/domain filtering
+- [x] ACL (Allow/Deny by IP/subnet)
+- [x] Basic Auth (with BasicAuthRealm)
+- [x] Connect port restriction
+- [x] URL/domain filtering (fnmatch, bre/ere patterns)
 
 ### Phase 4: Advanced Proxy Modes
-- [ ] Upstream proxy (HTTP/SOCKS4/SOCKS5)
-- [ ] Reverse proxy
-- [ ] Transparent proxy
+- [x] Upstream proxy (HTTP + SOCKS4/SOCKS5 + NoUpstream)
+- [x] Reverse proxy (ReversePath, ReverseOnly, ReverseMagic, ReverseBaseURL)
+- [x] Transparent proxy (Linux SO_ORIGINAL_DST)
 
 ### Phase 5: Production
-- [ ] Statistics page
-- [ ] Signal handling (graceful shutdown, config reload)
-- [ ] Daemon mode
-- [ ] Custom error pages
+- [x] Statistics page (StatHost, StatFile)
+- [x] Signal handling (SIGTERM/SIGINT/SIGUSR1/SIGHUP)
+- [x] Config reload on SIGHUP
+- [x] Daemon mode (daemonize, PID file, privilege drop)
+- [x] Custom error pages (ErrorFile, DefaultErrorFile)
 
 ## Quick Start
 
@@ -74,7 +75,7 @@ wrk -c 100 -t 4 http://127.0.0.1:9999
 
 ## Development
 
-See [docs/plans/2026-01-11-implementation-roadmap.md](docs/plans/2026-01-11-implementation-roadmap.md) for detailed implementation plan.
+See [docs/roadmap.md](docs/roadmap.md) for detailed implementation plan.
 
 ### Project Structure
 

@@ -1,0 +1,144 @@
+# tinyproxy-zig configuration file
+# Compatible with tinyproxy configuration format
+
+# =========================================================================
+# Network Configuration
+# =========================================================================
+
+# Port to listen on
+Port 9999
+
+# Address to listen on (0.0.0.0 = all interfaces)
+Listen 127.0.0.1
+
+# =========================================================================
+# Connection Control
+# =========================================================================
+
+# Maximum clients to serve simultaneously
+MaxClients 100
+
+# Seconds before idle connections are closed
+Timeout 600
+
+# =========================================================================
+# Logging
+# =========================================================================
+
+# Log file location (comment out to log to stderr)
+# LogFile "/var/log/tinyproxy.log"
+
+# Log level: Critical, Error, Warning, Notice, Connect, Info
+LogLevel Info
+
+# Use syslog instead of log file (On/Off)
+# Syslog On
+
+# =========================================================================
+# Daemon Mode (requires root to start)
+# =========================================================================
+
+# User to run as after binding port
+# User nobody
+
+# Group to run as after binding port
+# Group nogroup
+
+# PID file location
+# PidFile "/var/run/tinyproxy.pid"
+
+# =========================================================================
+# Via Header
+# =========================================================================
+
+# Custom proxy name for Via header
+# ViaProxyName "my-proxy"
+
+# Disable Via header entirely (not RFC compliant)
+# DisableViaHeader Yes
+
+# =========================================================================
+# Anonymous Mode
+# =========================================================================
+
+# When Anonymous is enabled, only listed headers are forwarded
+# Anonymous "Host"
+# Anonymous "Authorization"
+# Anonymous "Cookie"
+# Anonymous "Accept"
+# Anonymous "Accept-Encoding"
+# Anonymous "Accept-Language"
+
+# =========================================================================
+# Connect Port Restrictions
+# =========================================================================
+
+# Limit which ports CONNECT can tunnel to
+# If no ConnectPort lines, all ports allowed
+# ConnectPort 443
+# ConnectPort 563
+# ConnectPort 8000-9000
+
+# =========================================================================
+# Access Control
+# =========================================================================
+
+# Control which clients can connect to the proxy.
+# Rules are evaluated in order - last matching rule wins.
+# To allow localhost and local network, deny all others:
+# Deny 0.0.0.0/0
+# Allow 127.0.0.1
+# Allow 192.168.0.0/16
+# Allow ::1
+
+# =========================================================================
+# Basic Authentication
+# =========================================================================
+
+# Require authentication to use the proxy
+# Multiple users can be configured
+# BasicAuth admin secretpassword
+# BasicAuth user1 password1
+
+# =========================================================================
+# Transparent Proxy (requires iptables/pf redirection)
+# =========================================================================
+
+# Enable transparent proxy mode (Linux only)
+# Requires iptables REDIRECT or TPROXY rules
+# Transparent Yes
+
+# =========================================================================
+# Upstream Proxy (Phase 4.1)
+# =========================================================================
+#
+# Configure upstream proxies
+# Format: Upstream type (user:pass@)?host:port [match_domain]
+# Supported types: http, socks4, socks5
+#
+# Send all requests to parent proxy
+# Upstream http 10.0.0.1:8080
+#
+# Send .internal requests to specific proxy
+# Upstream http internal.proxy:8888 ".internal"
+#
+# Direct connection for local network (bypass upstream)
+# NoUpstream "192.168.0.0/16"
+# NoUpstream ".local"
+
+# =========================================================================
+# Reverse Proxy
+# =========================================================================
+
+# Map URL paths to backend servers
+# ReversePath "/api" "http://api-server:8080/"
+# ReversePath "/static" "http://cdn:80/"
+
+# Only allow reverse proxy mode (reject forward proxy requests)
+# ReverseOnly Yes
+
+# Enable magic cookie tracking for sites with absolute URLs
+# ReverseMagic Yes
+
+# Base URL for redirect rewriting
+# ReverseBaseURL "http://proxy.example.com/"

@@ -3,22 +3,164 @@ const std = @import("std");
 const zio = @import("zio");
 
 const child = @import("child.zig");
+const conf_parser = @import("conf.zig");
 const Config = @import("config.zig").Config;
+const daemon = @import("daemon.zig");
+const logger = @import("log.zig");
+const signals = @import("signals.zig");
+const stats = @import("stats.zig");
+
+const DefaultConfigPath = "";
+
+const ArgsError = error{InvalidArgs};
+
+const CliOptions = struct {
+    config_path: []const u8,
+    foreground: bool,
+};
+
+fn parseArgs(args: []const []const u8) ArgsError!CliOptions {
+    var config_path: ?[]const u8 = null;
+    var foreground: bool = false;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--config")) {
+            if (i + 1 >= args.len) return error.InvalidArgs;
+            config_path = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--foreground")) {
+            foreground = true;
+            continue;
+        }
+        return error.InvalidArgs;
+    }
+    return .{
+        .config_path = config_path orelse DefaultConfigPath,
+        .foreground = foreground,
+    };
+}
+
+fn printUsage() void {
+    const stderr = std.fs.File.stderr().deprecatedWriter();
+    stderr.writeAll(
+        \\Usage: tinyproxy-zig [OPTIONS]
+        \\
+        \\Options:
+        \\  -c, --config <path>   Path to configuration file
+        \\  -d, --foreground      Run in foreground (don't daemonize)
+        \\
+    ) catch {};
+}
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const conf = Config.init();
-    const zrt = try zio.Runtime.init(allocator, .{ .num_executors = 1 });
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    const cli = parseArgs(args) catch |err| {
+        printUsage();
+        return err;
+    };
+
+    var conf = if (cli.config_path.len == 0)
+        Config.init(allocator)
+    else
+        conf_parser.parseFile(allocator, cli.config_path) catch |err| {
+            const stderr = std.fs.File.stderr().deprecatedWriter();
+            stderr.print("Failed to load config '{s}': {}\n", .{ cli.config_path, err }) catch {};
+            return err;
+        };
+    defer conf.deinit();
+
+    // Daemonize if not running in foreground mode
+    if (!cli.foreground) {
+        daemon.daemonize() catch |err| {
+            const stderr = std.fs.File.stderr().deprecatedWriter();
+            stderr.print("Failed to daemonize: {}\n", .{err}) catch {};
+            return err;
+        };
+    }
+
+    // Write PID file if configured
+    if (conf.pid_file) |pid_path| {
+        daemon.writePidFile(pid_path) catch |err| {
+            const stderr = std.fs.File.stderr().deprecatedWriter();
+            stderr.print("Failed to write PID file: {}\n", .{err}) catch {};
+            return err;
+        };
+    }
+
+    try logger.init(&conf);
+    defer logger.deinit();
+
+    // Initialize statistics start time
+    stats.global.initStartTime();
+
+    const zrt = try zio.Runtime.init(allocator, .{ .executors = .exact(1) });
     defer zrt.deinit();
 
-    var handle = try zrt.spawn(main_task, .{ zrt, &conf }, .{});
+    // Setup signal handlers
+    try signals.setup();
+    defer signals.cleanup();
+
+    // Clean up PID file on exit
+    defer {
+        if (conf.pid_file) |pid_path| {
+            daemon.removePidFile(pid_path);
+        }
+    }
+
+    var handle = try zrt.spawn(main_task, .{ zrt, &conf, cli.config_path });
     try handle.join(zrt);
 }
 
-fn main_task(rt: *zio.Runtime, conf: *const Config) !void {
-    try child.listen_socket(rt, conf.listen, conf.port);
-    try child.main_loop(rt);
+fn main_task(rt: *zio.Runtime, conf: *Config, config_path: []const u8) !void {
+    try child.listen_socket(rt, conf);
+    try child.main_loop(rt, conf, config_path);
+}
+
+test "parseArgs default path" {
+    const args = [_][]const u8{"tinyproxy-zig"};
+    const cli = try parseArgs(&args);
+    try std.testing.expectEqualStrings("", cli.config_path);
+    try std.testing.expect(!cli.foreground);
+}
+
+test "parseArgs -c" {
+    const args = [_][]const u8{ "tinyproxy-zig", "-c", "./cfg.conf" };
+    const cli = try parseArgs(&args);
+    try std.testing.expectEqualStrings("./cfg.conf", cli.config_path);
+}
+
+test "parseArgs --config" {
+    const args = [_][]const u8{ "tinyproxy-zig", "--config", "conf/tinyproxy.conf" };
+    const cli = try parseArgs(&args);
+    try std.testing.expectEqualStrings("conf/tinyproxy.conf", cli.config_path);
+}
+
+test "parseArgs -d foreground" {
+    const args = [_][]const u8{ "tinyproxy-zig", "-d" };
+    const cli = try parseArgs(&args);
+    try std.testing.expect(cli.foreground);
+}
+
+test "parseArgs combined options" {
+    const args = [_][]const u8{ "tinyproxy-zig", "-d", "-c", "test.conf" };
+    const cli = try parseArgs(&args);
+    try std.testing.expect(cli.foreground);
+    try std.testing.expectEqualStrings("test.conf", cli.config_path);
+}
+
+test "parseArgs invalid args" {
+    const args_missing = [_][]const u8{ "tinyproxy-zig", "-c" };
+    try std.testing.expectError(error.InvalidArgs, parseArgs(&args_missing));
+
+    const args_unknown = [_][]const u8{ "tinyproxy-zig", "--unknown" };
+    try std.testing.expectError(error.InvalidArgs, parseArgs(&args_unknown));
 }
