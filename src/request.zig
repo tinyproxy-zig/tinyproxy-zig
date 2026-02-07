@@ -53,8 +53,8 @@ fn sendErrorResponse(
                 err.statusLine(),
                 content.len,
             }) catch unreachable;
-            try stream.writeAll(rt, header, .none);
-            try stream.writeAll(rt, content, .none);
+            try stream.writeAll(header, .none);
+            try stream.writeAll(content, .none);
             return;
         }
     }
@@ -68,8 +68,8 @@ fn sendErrorResponse(
                 err.statusLine(),
                 content.len,
             }) catch unreachable;
-            try stream.writeAll(rt, header, .none);
-            try stream.writeAll(rt, content, .none);
+            try stream.writeAll(header, .none);
+            try stream.writeAll(content, .none);
             return;
         }
     }
@@ -81,7 +81,7 @@ fn sendErrorResponse(
         // Ultimate fallback: simple text response
         var buf: [512]u8 = undefined;
         const response = html_error.buildSimpleResponse(err, &buf) catch ERROR_502;
-        try stream.writeAll(rt, response, .none);
+        try stream.writeAll(response, .none);
         return;
     };
     defer rt.allocator.free(body);
@@ -91,8 +91,8 @@ fn sendErrorResponse(
         err.statusLine(),
         body.len,
     }) catch unreachable;
-    try stream.writeAll(rt, header, .none);
-    try stream.writeAll(rt, body, .none);
+    try stream.writeAll(header, .none);
+    try stream.writeAll(body, .none);
 }
 
 fn loadErrorFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
@@ -125,7 +125,7 @@ fn appendAddHeaders(message: *http.HttpMessage, config: *const Config) !void {
 /// Handle an incoming client connection
 pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *const Config) !void {
     var stream = client;
-    defer stream.close(rt);
+    defer stream.close();
 
     var reader = buffer.LineReader.init(rt.allocator, 8192);
     defer reader.deinit();
@@ -144,10 +144,10 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *cons
             const auth_mod = @import("auth.zig");
             var response_buf: [512]u8 = undefined;
             const response = auth_mod.build407Response(config.auth.realm, &response_buf) catch {
-                try stream.writeAll(rt, "HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n", .none);
+                try stream.writeAll("HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n", .none);
                 return;
             };
-            try stream.writeAll(rt, response, .none);
+            try stream.writeAll(response, .none);
             return;
         }
     }
@@ -197,7 +197,7 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *cons
         defer rt.allocator.free(filter_url);
 
         if (config.isFiltered(filter_url)) {
-            try stream.writeAll(rt, ERROR_403_FILTERED, .none);
+            try stream.writeAll(ERROR_403_FILTERED, .none);
             return;
         }
     }
@@ -222,7 +222,7 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *cons
             is_reverse_proxy = true;
         } else if (config.reverse.reverse_only) {
             // ReverseOnly mode: reject requests that don't match any mapping
-            try stream.writeAll(rt, ERROR_403_REVERSE_ONLY, .none);
+            try stream.writeAll(ERROR_403_REVERSE_ONLY, .none);
             return;
         }
     }
@@ -232,41 +232,41 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *cons
         // Check if port is allowed
         const check = connect_ports.checkConnectPort(config, req.port);
         if (check == .denied) {
-            try stream.writeAll(rt, ERROR_403_CONNECT, .none);
+            try stream.writeAll(ERROR_403_CONNECT, .none);
             return;
         }
 
         const conn_res = try connectTarget(rt, req, config, stream.socket.handle);
         var upstream = conn_res.stream;
-        defer upstream.close(rt);
+        defer upstream.close();
 
         if (conn_res.proxy) |p| {
             switch (p.proxy_type) {
                 .http => {
                     const connect_cmd = try std.fmt.allocPrint(rt.allocator, "CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n\r\n", .{ req.host, req.port, req.host, req.port });
                     defer rt.allocator.free(connect_cmd);
-                    try upstream.writeAll(rt, connect_cmd, .none);
+                    try upstream.writeAll(connect_cmd, .none);
 
                     var buf: [4096]u8 = undefined;
-                    const n = try upstream.read(rt, &buf, .none);
+                    const n = try upstream.read(&buf, .none);
                     if (n == 0) return error.ProxyConnectionClosed;
 
                     const response = buf[0..n];
                     if (std.mem.indexOf(u8, response, " 200 ") == null) {
-                        try stream.writeAll(rt, ERROR_502, .none);
+                        try stream.writeAll(ERROR_502, .none);
                         return;
                     }
                 },
                 .socks4, .socks5 => {
                     socks.connect(rt, &upstream, p.proxy_type, p.user, p.pass, req.host, req.port) catch {
-                        try stream.writeAll(rt, ERROR_502, .none);
+                        try stream.writeAll(ERROR_502, .none);
                         return;
                     };
                 },
             }
         }
 
-        try stream.writeAll(rt, "HTTP/1.1 200 Connection established\r\nProxy-agent: tinyproxy\r\n\r\n", .none);
+        try stream.writeAll("HTTP/1.1 200 Connection established\r\nProxy-agent: tinyproxy\r\n\r\n", .none);
         _ = try reader.flush_to(rt, &upstream);
         try relay.copy_bidi(rt, stream, upstream);
         return;
@@ -275,7 +275,7 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *cons
     // Regular HTTP request
     const conn_res = try connectTarget(rt, req, config, stream.socket.handle);
     var upstream = conn_res.stream;
-    defer upstream.close(rt);
+    defer upstream.close();
 
     if (conn_res.proxy) |p| {
         switch (p.proxy_type) {
@@ -286,7 +286,7 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *cons
             },
             .socks4, .socks5 => {
                 socks.connect(rt, &upstream, p.proxy_type, p.user, p.pass, req.host, req.port) catch {
-                    try stream.writeAll(rt, ERROR_502, .none);
+                    try stream.writeAll(ERROR_502, .none);
                     return;
                 };
             },
@@ -317,28 +317,28 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *cons
     });
     defer rt.allocator.free(request_line);
 
-    try upstream.writeAll(rt, request_line, .none);
+    try upstream.writeAll(request_line, .none);
     try writeHostHeader(rt, &upstream, req);
-    try upstream.writeAll(rt, "Connection: close\r\n", .none);
+    try upstream.writeAll("Connection: close\r\n", .none);
 
     // Add X-Tinyproxy header with client IP if enabled
     if (config.xtinyproxy) {
         var ip_buf: [64]u8 = undefined;
         const ip_str = std.fmt.bufPrint(&ip_buf, "{f}", .{stream.socket.address.ip}) catch "";
         if (ip_str.len > 0) {
-            try upstream.writeAll(rt, "X-Tinyproxy: ", .none);
-            try upstream.writeAll(rt, ip_str, .none);
-            try upstream.writeAll(rt, "\r\n", .none);
+            try upstream.writeAll("X-Tinyproxy: ", .none);
+            try upstream.writeAll(ip_str, .none);
+            try upstream.writeAll("\r\n", .none);
         }
     }
 
     for (message.header_list.items) |header| {
-        try upstream.writeAll(rt, header.name, .none);
-        try upstream.writeAll(rt, ": ", .none);
-        try upstream.writeAll(rt, header.value, .none);
-        try upstream.writeAll(rt, "\r\n", .none);
+        try upstream.writeAll(header.name, .none);
+        try upstream.writeAll(": ", .none);
+        try upstream.writeAll(header.value, .none);
+        try upstream.writeAll("\r\n", .none);
     }
-    try upstream.writeAll(rt, "\r\n", .none);
+    try upstream.writeAll("\r\n", .none);
 
     var body_reader = message.body_reader();
     try body_reader.copy_raw_to(&reader, rt, &stream, &upstream);
@@ -424,29 +424,29 @@ fn processServerResponse(
     }
 
     // Write status line
-    try to.writeAll(rt, status_line, .none);
-    try to.writeAll(rt, "\r\n", .none);
+    try to.writeAll(status_line, .none);
+    try to.writeAll("\r\n", .none);
 
     // Write processed headers
     for (resp_message.header_list.items) |header| {
-        try to.writeAll(rt, header.name, .none);
-        try to.writeAll(rt, ": ", .none);
-        try to.writeAll(rt, header.value, .none);
-        try to.writeAll(rt, "\r\n", .none);
+        try to.writeAll(header.name, .none);
+        try to.writeAll(": ", .none);
+        try to.writeAll(header.value, .none);
+        try to.writeAll("\r\n", .none);
     }
-    try to.writeAll(rt, "\r\n", .none);
+    try to.writeAll("\r\n", .none);
 
     // Forward any buffered body data
     if (response_reader.end > response_reader.start) {
-        try to.writeAll(rt, response_reader.buf[response_reader.start..response_reader.end], .none);
+        try to.writeAll(response_reader.buf[response_reader.start..response_reader.end], .none);
     }
 
     // Forward remaining body
     var buf: [8192]u8 = undefined;
     while (true) {
-        const n = try from.read(rt, &buf, .none);
+        const n = try from.read(&buf, .none);
         if (n == 0) break;
-        try to.writeAll(rt, buf[0..n], .none);
+        try to.writeAll(buf[0..n], .none);
     }
 }
 
@@ -498,29 +498,30 @@ fn sendStatsResponse(rt: *zio.Runtime, stream: *zio.net.Stream, config: *const C
     var header_buf: [256]u8 = undefined;
     const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len}) catch unreachable;
 
-    try stream.writeAll(rt, header, .none);
-    try stream.writeAll(rt, body, .none);
+    try stream.writeAll(header, .none);
+    try stream.writeAll(body, .none);
 }
 
-fn writeHostHeader(rt: *zio.Runtime, upstream: *zio.net.Stream, req: *const Request) !void {
+fn writeHostHeader(_: *zio.Runtime, upstream: *zio.net.Stream, req: *const Request) !void {
     const is_ipv6 = std.mem.indexOfScalar(u8, req.host, ':') != null;
     const include_port = req.port != HTTP_PORT and req.port != HTTPS_PORT;
 
-    try upstream.writeAll(rt, "Host: ", .none);
-    if (is_ipv6) try upstream.writeAll(rt, "[", .none);
-    try upstream.writeAll(rt, req.host, .none);
-    if (is_ipv6) try upstream.writeAll(rt, "]", .none);
+    try upstream.writeAll("Host: ", .none);
+    if (is_ipv6) try upstream.writeAll("[", .none);
+    try upstream.writeAll(req.host, .none);
+    if (is_ipv6) try upstream.writeAll("]", .none);
     if (include_port) {
         var port_buf: [6]u8 = undefined;
         const port_str = try std.fmt.bufPrint(&port_buf, "{d}", .{req.port});
-        try upstream.writeAll(rt, ":", .none);
-        try upstream.writeAll(rt, port_str, .none);
+        try upstream.writeAll(":", .none);
+        try upstream.writeAll(port_str, .none);
     }
-    try upstream.writeAll(rt, "\r\n", .none);
+    try upstream.writeAll("\r\n", .none);
 }
 
 fn strip_username_password(host: []u8) usize {
     const at_pos = std.mem.indexOf(u8, host, "@") orelse return host.len;
+    if (at_pos + 1 >= host.len) return host.len; // Bounds check
     const src_start = at_pos + 1;
     const bytes_to_copy = host.len - src_start;
     std.mem.copyForwards(u8, host[0..bytes_to_copy], host[src_start..]);

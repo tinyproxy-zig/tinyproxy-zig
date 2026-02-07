@@ -68,6 +68,7 @@ pub const BasicAuth = struct {
 
     /// Verify the Authorization header
     /// Returns true if valid credentials, false otherwise
+    /// Uses constant-time comparison to prevent timing attacks
     pub fn verify(self: *const Self, auth_header: ?[]const u8) bool {
         const header = auth_header orelse return false;
 
@@ -89,12 +90,22 @@ pub const BasicAuth = struct {
         const user = decoded[0..colon_pos];
         const pass = decoded[colon_pos + 1 ..];
 
-        // Verify credentials
+        // Verify credentials using constant-time comparison
         if (self.credentials.get(user)) |stored_pass| {
-            return std.mem.eql(u8, pass, stored_pass);
+            return cryptoEq(u8, pass, stored_pass);
         }
 
         return false;
+    }
+
+    /// Constant-time equality check to prevent timing attacks
+    inline fn cryptoEq(comptime T: type, a: []const T, b: []const T) bool {
+        if (a.len != b.len) return false;
+        var result: T = 0;
+        for (a, 0..) |x, i| {
+            result |= x ^ b[i];
+        }
+        return result == 0;
     }
 
     /// Free all resources

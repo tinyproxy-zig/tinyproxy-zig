@@ -509,10 +509,10 @@ fn parseLine(allocator: std.mem.Allocator, config: *Config, line: []const u8) !v
         },
 
         // Prefork directives - not supported in single-threaded coroutine model
-        // Log warning and ignore
+        // These are ignored but should log a warning in production
         .max_spare_servers, .min_spare_servers, .start_servers => {
-            // Silently ignore prefork directives
-            // Our single-threaded coroutine model doesn't use prefork
+            // Prefork directives not applicable to single-threaded coroutine model
+            // TODO: Consider logging a warning for user awareness
         },
 
         .unknown => {
@@ -605,10 +605,19 @@ fn parseBoolean(s: []const u8) ?bool {
 
 /// Parse connect port specification (e.g., "443" or "8000-9000")
 fn parseConnectPort(config: *Config, value: []const u8) !void {
+    // Validate input length to prevent overflow
+    if (value.len == 0 or value.len > 11) return error.InvalidPort; // Max "65535-65535"
+
     // Check for range (contains '-')
     if (std.mem.indexOfScalar(u8, value, '-')) |dash_pos| {
+        if (dash_pos == 0 or dash_pos == value.len - 1) return error.InvalidPortRange;
+
         const min_str = value[0..dash_pos];
         const max_str = value[dash_pos + 1 ..];
+
+        // Validate lengths to prevent overflow (max 5 digits per port)
+        if (min_str.len == 0 or min_str.len > 5) return error.InvalidPortRange;
+        if (max_str.len == 0 or max_str.len > 5) return error.InvalidPortRange;
 
         const min = std.fmt.parseInt(u16, min_str, 10) catch return error.InvalidPortRange;
         const max = std.fmt.parseInt(u16, max_str, 10) catch return error.InvalidPortRange;
@@ -624,12 +633,9 @@ fn parseConnectPort(config: *Config, value: []const u8) !void {
 }
 
 /// Case-insensitive ASCII string comparison
-fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |ca, cb| {
-        if (std.ascii.toLower(ca) != std.ascii.toLower(cb)) return false;
-    }
-    return true;
+/// Uses std.ascii.eqlIgnoreCase for better performance
+inline fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b);
 }
 
 // ============================================================================

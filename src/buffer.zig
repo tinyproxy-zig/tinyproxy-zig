@@ -16,35 +16,37 @@ pub const LineReader = struct {
         _ = self;
     }
 
-    pub fn readLine(self: *LineReader, rt: *zio.Runtime, stream: *zio.net.Stream) ![]u8 {
+    pub fn readLine(self: *LineReader, _: *zio.Runtime, stream: *zio.net.Stream) ![]u8 {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
 
         while (true) {
             if (self.start == self.end) {
                 self.start = 0;
-                self.end = try stream.read(rt, &self.buf, .none);
+                self.end = try stream.read(&self.buf, .none);
                 if (self.end == 0) return error.EndOfStream;
             }
 
             const slice = self.buf[self.start..self.end];
             if (std.mem.indexOfScalar(u8, slice, '\n')) |pos| {
                 const chunk = slice[0 .. pos + 1];
+                // Check max length before appending to prevent overflow
+                if (out.items.len + chunk.len > self.max_len) return error.LineTooLong;
                 try out.appendSlice(self.allocator, chunk);
                 self.start += pos + 1;
                 break;
             }
 
+            // Check max length before appending to prevent overflow
+            if (out.items.len + slice.len > self.max_len) return error.LineTooLong;
             try out.appendSlice(self.allocator, slice);
             self.start = self.end;
-
-            if (out.items.len > self.max_len) return error.LineTooLong;
         }
 
         return try out.toOwnedSlice(self.allocator);
     }
 
-    pub fn read(self: *LineReader, rt: *zio.Runtime, stream: *zio.net.Stream, out: []u8) !usize {
+    pub fn read(self: *LineReader, _: *zio.Runtime, stream: *zio.net.Stream, out: []u8) !usize {
         if (out.len == 0) return 0;
         if (self.start < self.end) {
             const available = self.end - self.start;
@@ -53,7 +55,7 @@ pub const LineReader = struct {
             self.start += n;
             return n;
         }
-        return stream.read(rt, out, .none);
+        return stream.read(out, .none);
     }
 
     pub fn read_exact(self: *LineReader, rt: *zio.Runtime, stream: *zio.net.Stream, out: []u8) !void {
@@ -67,10 +69,10 @@ pub const LineReader = struct {
 
     /// Flush any buffered data to the given writer stream.
     /// Returns the number of bytes flushed.
-    pub fn flush_to(self: *LineReader, rt: *zio.Runtime, writer: *zio.net.Stream) !usize {
+    pub fn flush_to(self: *LineReader, _: *zio.Runtime, writer: *zio.net.Stream) !usize {
         if (self.start >= self.end) return 0;
         const buffered = self.buf[self.start..self.end];
-        try writer.writeAll(rt, buffered, .none);
+        try writer.writeAll(buffered, .none);
         const flushed = buffered.len;
         self.start = self.end;
         return flushed;
@@ -79,12 +81,12 @@ pub const LineReader = struct {
 
 fn server_task(rt: *zio.Runtime, ready: *zio.ResetEvent) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18081);
-    var server = try addr.listen(rt, .{});
-    defer server.close(rt);
+    var server = try addr.listen(.{});
+    defer server.close();
     ready.set();
 
-    var stream = try server.accept(rt);
-    defer stream.close(rt);
+    var stream = try server.accept();
+    defer stream.close();
 
     var reader = LineReader.init(rt.allocator, 1024);
     defer reader.deinit();
@@ -103,24 +105,24 @@ test "line reader reads one line" {
 
     var ready = zio.ResetEvent.init;
     var server = try rt.spawn(server_task, .{ rt, &ready });
-    try ready.wait(rt);
+    try ready.wait();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18081);
-    var client = try addr.connect(rt, .{});
-    defer client.close(rt);
+    var client = try addr.connect(.{});
+    defer client.close();
 
-    try client.writeAll(rt, "GET / HTTP/1.1\r\n", .none);
-    try server.join(rt);
+    try client.writeAll("GET / HTTP/1.1\r\n", .none);
+    try server.join();
 }
 
 fn server_read_buffered(rt: *zio.Runtime, ready: *zio.ResetEvent) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18084);
-    var server = try addr.listen(rt, .{});
-    defer server.close(rt);
+    var server = try addr.listen(.{});
+    defer server.close();
     ready.set();
 
-    var stream = try server.accept(rt);
-    defer stream.close(rt);
+    var stream = try server.accept();
+    defer stream.close();
 
     var reader = LineReader.init(rt.allocator, 1024);
     defer reader.deinit();
@@ -142,24 +144,24 @@ test "line reader reads buffered bytes" {
 
     var ready = zio.ResetEvent.init;
     var server = try rt.spawn(server_read_buffered, .{ rt, &ready });
-    try ready.wait(rt);
+    try ready.wait();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18084);
-    var client = try addr.connect(rt, .{});
-    defer client.close(rt);
+    var client = try addr.connect(.{});
+    defer client.close();
 
-    try client.writeAll(rt, "GET / HTTP/1.1\r\nBODY", .none);
-    try server.join(rt);
+    try client.writeAll("GET / HTTP/1.1\r\nBODY", .none);
+    try server.join();
 }
 
 fn server_read_exact(rt: *zio.Runtime, ready: *zio.ResetEvent) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18085);
-    var server = try addr.listen(rt, .{});
-    defer server.close(rt);
+    var server = try addr.listen(.{});
+    defer server.close();
     ready.set();
 
-    var stream = try server.accept(rt);
-    defer stream.close(rt);
+    var stream = try server.accept();
+    defer stream.close();
 
     var reader = LineReader.init(rt.allocator, 1024);
     defer reader.deinit();
@@ -180,12 +182,12 @@ test "line reader read_exact fills buffer" {
 
     var ready = zio.ResetEvent.init;
     var server = try rt.spawn(server_read_exact, .{ rt, &ready });
-    try ready.wait(rt);
+    try ready.wait();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18085);
-    var client = try addr.connect(rt, .{});
-    defer client.close(rt);
+    var client = try addr.connect(.{});
+    defer client.close();
 
-    try client.writeAll(rt, "GET / HTTP/1.1\r\nHELLO", .none);
-    try server.join(rt);
+    try client.writeAll("GET / HTTP/1.1\r\nHELLO", .none);
+    try server.join();
 }

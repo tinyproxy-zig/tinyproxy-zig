@@ -22,6 +22,23 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // Test spawn executable
+    const test_spawn_mod = b.createModule(.{
+        .root_source_file = b.path("test_spawn.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_spawn_mod.addImport("zio", zio_mod);
+
+    const test_spawn_exe = b.addExecutable(.{
+        .name = "test_spawn",
+        .root_module = test_spawn_mod,
+    });
+
+    const test_spawn_cmd = b.addRunArtifact(test_spawn_exe);
+    const test_spawn_step = b.step("test-spawn", "Test spawn");
+    test_spawn_step.dependOn(&test_spawn_cmd.step);
+
     const run_cmd = b.addRunArtifact(exe);
 
     run_cmd.step.dependOn(b.getInstallStep());

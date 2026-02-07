@@ -56,8 +56,16 @@ fn printUsage() void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}).init;
-    defer _ = gpa.deinit();
+    // Use DebugAllocator in development builds for leak detection
+    var gpa = std.heap.DebugAllocator(.{
+        .safety = true,
+    }).init;
+    defer {
+        const leaked = gpa.deinit();
+        if (leaked == .leak) {
+            std.log.err("Memory leaks detected!", .{});
+        }
+    }
     const allocator = gpa.allocator();
 
     const args = try std.process.argsAlloc(allocator);
@@ -72,7 +80,7 @@ pub fn main() !void {
         Config.init(allocator)
     else
         conf_parser.parseFile(allocator, cli.config_path) catch |err| {
-            const stderr = std.fs.File.stderr().deprecatedWriter();
+        const stderr = std.fs.File.stderr().deprecatedWriter();
             stderr.print("Failed to load config '{s}': {}\n", .{ cli.config_path, err }) catch {};
             return err;
         };
@@ -117,12 +125,16 @@ pub fn main() !void {
     }
 
     var handle = try zrt.spawn(main_task, .{ zrt, &conf, cli.config_path });
-    try handle.join(zrt);
+    try handle.join();
 }
 
 fn main_task(rt: *zio.Runtime, conf: *Config, config_path: []const u8) !void {
+    const log_main = std.log.scoped(.main_task);
+    log_main.info("starting", .{});
     try child.listen_socket(rt, conf);
+    log_main.info("listen_socket returned, calling main_loop", .{});
     try child.main_loop(rt, conf, config_path);
+    log_main.info("main_loop returned", .{});
 }
 
 test "parseArgs default path" {

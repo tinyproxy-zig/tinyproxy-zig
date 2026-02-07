@@ -6,11 +6,9 @@ const zio = @import("zio");
 
 const Config = @import("config.zig").Config;
 
-pub fn opensock(host: []u8, port: u16, bind_to: []u8) void {
-    _ = host;
-    _ = port;
-    _ = bind_to;
-}
+// Note: opensock was a placeholder for upstream proxy binding.
+// It's no longer used as binding is handled by connectWithBind.
+// Kept for API compatibility if needed.
 
 /// Connect to target with optional local address binding.
 /// If bind_addr is provided, the socket is bound to that local address before connecting.
@@ -21,7 +19,7 @@ pub fn connectWithBind(
 ) !zio.net.Stream {
     // If no bind address, use standard connect
     if (bind_addr == null) {
-        return target_addr.connect(rt, .{});
+        return target_addr.connect(.{});
     }
 
     const bind_ip = bind_addr.?;
@@ -35,15 +33,17 @@ pub fn connectWithBind(
 
     // Parse and bind to local address
     const local_addr = zio.net.IpAddress.parseIp(bind_ip, 0) catch {
-        // If parsing fails, just proceed without bind
+        // If parsing fails, log and proceed without bind
+        std.log.scoped(.socket).warn("Failed to parse bind address '{s}', connecting without bind", .{bind_ip});
         return connectSocket(rt, sock, target_addr);
     };
 
     // Bind to local address (port 0 = OS assigns ephemeral port)
     const bind_sockaddr: *const posix.sockaddr = @ptrCast(&local_addr.any);
     const bind_len: posix.socklen_t = if (family == posix.AF.INET6) @sizeOf(posix.sockaddr.in6) else @sizeOf(posix.sockaddr.in);
-    posix.bind(sock, bind_sockaddr, bind_len) catch {
-        // Bind failure is non-fatal, continue without bind
+    posix.bind(sock, bind_sockaddr, bind_len) catch |err| {
+        // Bind failure is non-fatal, log and continue without bind
+        std.log.scoped(.socket).warn("Failed to bind to '{s}': {}, connecting without bind", .{ bind_ip, err });
         return connectSocket(rt, sock, target_addr);
     };
 
@@ -103,6 +103,7 @@ fn connectSocket(_: *zio.Runtime, sock: posix.socket_t, target_addr: zio.net.IpA
         },
     };
 
+    // Keep socket non-blocking for zio async I/O
     // Wrap in zio Stream
     return .{
         .socket = .{
@@ -113,9 +114,10 @@ fn connectSocket(_: *zio.Runtime, sock: posix.socket_t, target_addr: zio.net.IpA
 }
 
 /// get peer (remote) address from the socket
-pub fn get_peer_addr(sock: posix.socket_t, addr: *net.Address) void {
+/// Returns true if successful, false on error
+pub fn get_peer_addr(sock: posix.socket_t, addr: *net.Address) bool {
     var addr_len: posix.socklen_t = @sizeOf(net.Address);
-    posix.getpeername(sock, &addr.any, &addr_len) catch unreachable;
+    return posix.getpeername(sock, &addr.any, &addr_len) == null;
 }
 
 /// get local address from the socket and format to string (IP only, no port)
@@ -125,6 +127,9 @@ pub fn get_local_addr_str(sock: posix.socket_t, buf: []u8) ?[]const u8 {
     var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
     posix.getsockname(sock, @ptrCast(&storage), &addr_len) catch return null;
 
+    // Validate minimum buffer size (IPv4 max 15 chars + null, IPv6 needs more)
+    if (buf.len < 46) return null; // Max IPv6 string length
+
     // Get address family and format IP only (without port)
     const family = storage.family;
     if (family == posix.AF.INET) {
@@ -132,12 +137,15 @@ pub fn get_local_addr_str(sock: posix.socket_t, buf: []u8) ?[]const u8 {
         const bytes: *const [4]u8 = @ptrCast(&addr4.addr);
         return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] }) catch return null;
     } else if (family == posix.AF.INET6) {
+        // Format IPv6 address manually
         const addr6: *const posix.sockaddr.in6 = @ptrCast(&storage);
-        // Format IPv6 address - simplified version
-        return std.fmt.bufPrint(buf, "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
-            addr6.addr[0],  addr6.addr[1],  addr6.addr[2],  addr6.addr[3],
-            addr6.addr[4],  addr6.addr[5],  addr6.addr[6],  addr6.addr[7],
-            addr6.addr[8],  addr6.addr[9],  addr6.addr[10], addr6.addr[11],
+        // Simplified IPv6 formatting - just format all bytes
+        return std.fmt.bufPrint(buf,
+            \\{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}
+        , .{
+            addr6.addr[0], addr6.addr[1], addr6.addr[2], addr6.addr[3],
+            addr6.addr[4], addr6.addr[5], addr6.addr[6], addr6.addr[7],
+            addr6.addr[8], addr6.addr[9], addr6.addr[10], addr6.addr[11],
             addr6.addr[12], addr6.addr[13], addr6.addr[14], addr6.addr[15],
         }) catch return null;
     }

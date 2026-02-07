@@ -88,14 +88,20 @@ pub const UpstreamManager = struct {
                 user = try self.allocator.dupe(u8, auth_part);
             }
         }
-        errdefer {
-            if (user) |u| self.allocator.free(u);
-            if (pass) |p| self.allocator.free(p);
-        }
 
         // Parse host:port
-        const colon_pos = std.mem.lastIndexOfScalar(u8, host_port_str, ':') orelse return error.InvalidUpstreamAddress;
-        if (colon_pos == 0) return error.InvalidUpstreamAddress;
+        const colon_pos = std.mem.lastIndexOfScalar(u8, host_port_str, ':') orelse {
+            // Clean up user/pass on error
+            if (user) |u| self.allocator.free(u);
+            if (pass) |p| self.allocator.free(p);
+            return error.InvalidUpstreamAddress;
+        };
+        if (colon_pos == 0) {
+            // Clean up user/pass on error
+            if (user) |u| self.allocator.free(u);
+            if (pass) |p| self.allocator.free(p);
+            return error.InvalidUpstreamAddress;
+        }
 
         const host_part = host_port_str[0..colon_pos];
         const port_part = host_port_str[colon_pos + 1 ..];
@@ -103,16 +109,27 @@ pub const UpstreamManager = struct {
         const host = try self.allocator.dupe(u8, host_part);
         errdefer self.allocator.free(host);
 
-        const port = std.fmt.parseInt(u16, port_part, 10) catch return error.InvalidPort;
+        const port = std.fmt.parseInt(u16, port_part, 10) catch {
+            // Clean up user/pass/host on error
+            if (user) |u| self.allocator.free(u);
+            if (pass) |p| self.allocator.free(p);
+            self.allocator.free(host);
+            return error.InvalidPort;
+        };
 
         // 3. Optional Match Spec
         var match: ?HostSpec = null;
         if (iter.next()) |match_str| {
             // Strip quotes
             const trimmed_match = std.mem.trim(u8, match_str, "\"'");
-            match = try HostSpec.parse(self.allocator, trimmed_match);
+            match = HostSpec.parse(self.allocator, trimmed_match) catch |err| {
+                // Clean up on parse error
+                if (user) |u| self.allocator.free(u);
+                if (pass) |p| self.allocator.free(p);
+                self.allocator.free(host);
+                return err;
+            };
         }
-        errdefer if (match) |m| m.deinit(self.allocator);
 
         try self.proxies.append(self.allocator, .{
             .proxy_type = proxy_type,

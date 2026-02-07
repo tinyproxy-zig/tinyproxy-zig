@@ -73,10 +73,10 @@ fn build_socks5_connect(buf: []u8, host: []const u8, port: u16) SocksError![]con
     return buf[0..needed];
 }
 
-fn read_exact(rt: *zio.Runtime, stream: anytype, out: []u8) SocksError!void {
+fn read_exact(_: *zio.Runtime, stream: anytype, out: []u8) SocksError!void {
     var filled: usize = 0;
     while (filled < out.len) {
-        const n = stream.read(rt, out[filled..], .none) catch return SocksError.SocksProtocolError;
+        const n = stream.read(out[filled..], .none) catch return SocksError.SocksProtocolError;
         if (n == 0) return SocksError.SocksProtocolError;
         filled += n;
     }
@@ -85,7 +85,7 @@ fn read_exact(rt: *zio.Runtime, stream: anytype, out: []u8) SocksError!void {
 fn connect_socks4a(rt: *zio.Runtime, stream: anytype, host: []const u8, port: u16) SocksError!void {
     var buf: [512]u8 = undefined;
     const req = try build_socks4a_request(&buf, host, port);
-    stream.writeAll(rt, req, .none) catch return SocksError.SocksProtocolError;
+    stream.writeAll(req, .none) catch return SocksError.SocksProtocolError;
 
     var resp: [8]u8 = undefined;
     try read_exact(rt, stream, &resp);
@@ -106,7 +106,7 @@ fn connect_socks5(
     const auth_pass = pass orelse "";
 
     const methods = build_socks5_methods(&buf, has_auth);
-    stream.writeAll(rt, methods, .none) catch return SocksError.SocksProtocolError;
+    stream.writeAll(methods, .none) catch return SocksError.SocksProtocolError;
 
     var method_resp: [2]u8 = undefined;
     try read_exact(rt, stream, &method_resp);
@@ -115,7 +115,7 @@ fn connect_socks5(
     if (method_resp[1] == 2) {
         if (!has_auth) return SocksError.SocksMethodRejected;
         const auth_req = try build_socks5_auth(&buf, auth_user, auth_pass);
-        stream.writeAll(rt, auth_req, .none) catch return SocksError.SocksProtocolError;
+        stream.writeAll(auth_req, .none) catch return SocksError.SocksProtocolError;
 
         var auth_resp: [2]u8 = undefined;
         try read_exact(rt, stream, &auth_resp);
@@ -125,7 +125,7 @@ fn connect_socks5(
     }
 
     const connect_req = try build_socks5_connect(&buf, host, port);
-    stream.writeAll(rt, connect_req, .none) catch return SocksError.SocksProtocolError;
+    stream.writeAll(connect_req, .none) catch return SocksError.SocksProtocolError;
 
     var resp_hdr: [4]u8 = undefined;
     try read_exact(rt, stream, &resp_hdr);
@@ -208,13 +208,13 @@ const FakeStream = struct {
     write_buf: []u8,
     write_pos: usize = 0,
 
-    pub fn writeAll(self: *FakeStream, _: *zio.Runtime, data: []const u8) !void {
+    pub fn writeAll(self: *FakeStream, data: []const u8, _: anytype) !void {
         if (self.write_pos + data.len > self.write_buf.len) return error.OutOfMemory;
         std.mem.copyForwards(u8, self.write_buf[self.write_pos .. self.write_pos + data.len], data);
         self.write_pos += data.len;
     }
 
-    pub fn read(self: *FakeStream, _: *zio.Runtime, out: []u8) !usize {
+    pub fn read(self: *FakeStream, out: []u8, _: anytype) !usize {
         if (self.read_pos >= self.read_buf.len) return 0;
         const remaining = self.read_buf.len - self.read_pos;
         const to_copy = @min(out.len, remaining);

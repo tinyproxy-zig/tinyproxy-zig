@@ -189,7 +189,7 @@ pub const Stats = struct {
         };
         defer allocator.free(template);
 
-        // Prepare replacement values
+        // Prepare all replacement values first (stack buffers for efficiency)
         var uptime_buf: [64]u8 = undefined;
         const uptime_str = self.formatUptime(&uptime_buf);
 
@@ -228,6 +228,8 @@ pub const Stats = struct {
         errdefer allocator.free(result);
 
         for (replacements) |r| {
+            // Skip if pattern not found
+            if (std.mem.indexOf(u8, result, r.pattern) == null) continue;
             result = try replaceAll(allocator, result, r.pattern, r.value);
         }
 
