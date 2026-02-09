@@ -21,6 +21,14 @@ const log = std.log.scoped(.@"tinyproxy/request");
 const HTTP_PORT: u16 = 80;
 const HTTPS_PORT: u16 = 443;
 
+/// Additional errors for request handling
+pub const RequestError = error{
+    ReverseOnlyDenied,
+    SocksHandshakeFailed,
+    ProxyConnectionClosed,
+    ProxyTunnelFailed,
+};
+
 pub const Request = struct {
     method: []u8,
     protocol: []u8,
@@ -122,47 +130,38 @@ fn appendAddHeaders(message: *http.HttpMessage, config: *const Config) !void {
     }
 }
 
-/// Handle an incoming client connection
-pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *const Config) !void {
-    var stream = client;
-    defer stream.close();
+/// Check authentication and send 407 if required
+fn checkAuthentication(stream: *zio.net.Stream, config: *const Config, message: *const http.HttpMessage) !bool {
+    if (!config.auth.hasCredentials()) return true;
 
-    var reader = buffer.LineReader.init(rt.allocator, 8192);
-    defer reader.deinit();
+    const auth_header = message.headers.get("proxy-authorization");
+    if (config.auth.verify(auth_header)) return true;
 
-    const req_line = try reader.readLine(rt, &stream);
-    defer rt.allocator.free(req_line);
+    // Send 407 Proxy Authentication Required
+    const auth_mod = @import("auth.zig");
+    var response_buf: [512]u8 = undefined;
+    const response = auth_mod.build407Response(config.auth.realm, &response_buf) catch {
+        try stream.writeAll("HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n", .none);
+        return false;
+    };
+    try stream.writeAll(response, .none);
+    return false;
+}
 
-    var message = try http.read_headers(rt.allocator, &reader, rt, &stream);
-    defer message.deinit();
-
-    // Check authentication if configured
-    if (config.auth.hasCredentials()) {
-        const auth_header = message.headers.get("proxy-authorization");
-        if (!config.auth.verify(auth_header)) {
-            // Send 407 Proxy Authentication Required
-            const auth_mod = @import("auth.zig");
-            var response_buf: [512]u8 = undefined;
-            const response = auth_mod.build407Response(config.auth.realm, &response_buf) catch {
-                try stream.writeAll("HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n", .none);
-                return;
-            };
-            try stream.writeAll(response, .none);
-            return;
-        }
-    }
-
-    // Try transparent proxy fallback if normal parsing fails due to missing Host
-    var transparent_buf: [64]u8 = undefined;
-
-    const req = process_request_line(rt.allocator, req_line, &message.headers) catch |err| blk: {
+/// Parse request with transparent proxy fallback
+fn parseRequestWithTransparentFallback(
+    rt: *zio.Runtime,
+    req_line: []const u8,
+    header_map: *const std.StringHashMap([]const u8),
+    config: *const Config,
+    socket_handle: std.posix.socket_t,
+) !*Request {
+    return process_request_line(rt.allocator, req_line, header_map) catch |err| {
         if (err == error.BadRequest and config.transparent) {
+            var transparent_buf: [64]u8 = undefined;
             // Try to get original destination from intercepted connection
-            if (transparent.getOriginalDest(stream.socket.handle, &transparent_buf)) |dest| {
-                // Parse just the request line for method and path
-                const parsed = http.parse_request_line(req_line) catch {
-                    return err;
-                };
+            if (transparent.getOriginalDest(socket_handle, &transparent_buf)) |dest| {
+                const parsed = http.parse_request_line(req_line) catch return err;
                 const req_obj = rt.allocator.create(Request) catch return err;
                 req_obj.* = .{
                     .method = rt.allocator.dupe(u8, parsed.method) catch return err,
@@ -172,11 +171,237 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *cons
                     .path = rt.allocator.dupe(u8, parsed.uri) catch return err,
                     .version = parsed.version,
                 };
-                break :blk req_obj;
+                return req_obj;
             }
         }
         return err;
     };
+}
+
+/// Result of reverse proxy processing
+const ReverseProxyResult = struct {
+    is_reverse: bool,
+    path_prefix: ?[]const u8,
+};
+
+/// Apply reverse proxy rewrite if configured
+fn applyReverseProxy(
+    rt: *zio.Runtime,
+    stream: *zio.net.Stream,
+    config: *const Config,
+    req: *Request,
+    cookie_header: ?[]const u8,
+) !ReverseProxyResult {
+    if (!config.reverse_initialized or !config.reverse.hasMapping()) {
+        return .{ .is_reverse = false, .path_prefix = null };
+    }
+
+    if (config.reverse.rewriteWithMagic(req.path, cookie_header)) |magic_result| {
+        const rw = magic_result.result;
+        const path_prefix = magic_result.path_prefix;
+        // Rewrite the request for reverse proxy
+        rt.allocator.free(req.host);
+        req.host = try rt.allocator.dupe(u8, rw.host);
+        req.port = rw.port;
+        rt.allocator.free(req.path);
+        req.path = try rt.allocator.dupe(u8, rw.path);
+        return .{ .is_reverse = true, .path_prefix = path_prefix };
+    } else if (config.reverse.reverse_only) {
+        // ReverseOnly mode: reject requests that don't match any mapping
+        try stream.writeAll(ERROR_403_REVERSE_ONLY, .none);
+        return RequestError.ReverseOnlyDenied;
+    }
+
+    return .{ .is_reverse = false, .path_prefix = null };
+}
+
+/// Handle CONNECT method
+fn handleConnect(
+    rt: *zio.Runtime,
+    stream: *zio.net.Stream,
+    reader: *buffer.LineReader,
+    req: *const Request,
+    config: *const Config,
+) !void {
+    const check = connect_ports.checkConnectPort(config, req.port);
+    if (check == .denied) {
+        try stream.writeAll(ERROR_403_CONNECT, .none);
+        return;
+    }
+
+    const conn_res = try connectTarget(rt, req, config, stream.socket.handle);
+    var upstream = conn_res.stream;
+    defer upstream.close();
+
+    if (conn_res.proxy) |p| {
+        try establishProxyTunnel(rt, &upstream, p, req);
+    }
+
+    try stream.writeAll("HTTP/1.1 200 Connection established\r\nProxy-agent: tinyproxy\r\n\r\n", .none);
+    _ = try reader.flush_to(rt, &upstream);
+    try relay.copy_bidi(rt, stream.*, upstream);
+}
+
+/// Establish tunnel through upstream proxy
+fn establishProxyTunnel(
+    rt: *zio.Runtime,
+    upstream: *zio.net.Stream,
+    proxy: *const upstream_mod.UpstreamProxy,
+    req: *const Request,
+) !void {
+    switch (proxy.proxy_type) {
+        .http => {
+            const connect_cmd = try std.fmt.allocPrint(rt.allocator, "CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n\r\n", .{ req.host, req.port, req.host, req.port });
+            defer rt.allocator.free(connect_cmd);
+            try upstream.writeAll(connect_cmd, .none);
+
+            var buf: [4096]u8 = undefined;
+            const n = try upstream.read(&buf, .none);
+            if (n == 0) return RequestError.ProxyConnectionClosed;
+
+            const response = buf[0..n];
+            if (std.mem.indexOf(u8, response, " 200 ") == null) {
+                return RequestError.ProxyTunnelFailed;
+            }
+        },
+        .socks4, .socks5 => {
+            try socks.connect(rt, upstream, proxy.proxy_type, proxy.user, proxy.pass, req.host, req.port);
+        },
+    }
+}
+
+/// Handle regular HTTP request
+fn handleHttpRequest(
+    rt: *zio.Runtime,
+    stream: *zio.net.Stream,
+    reader: *buffer.LineReader,
+    req: *Request,
+    config: *const Config,
+    message: *http.HttpMessage,
+    is_reverse: bool,
+    reverse_prefix: ?[]const u8,
+) !void {
+    const conn_res = try connectTarget(rt, req, config, stream.socket.handle);
+    var upstream = conn_res.stream;
+    defer upstream.close();
+
+    // Apply upstream proxy configuration
+    if (conn_res.proxy) |p| {
+        try applyUpstreamProxy(rt, stream.*, &upstream, p, req);
+    }
+
+    try appendAddHeaders(message, config);
+
+    // Remove hop-by-hop and explicit connection headers first.
+    headers.removeHopByHop(message);
+    headers.removeHeader(message, "host");
+
+    // Apply anonymous mode filtering
+    anonymous.filterHeaders(message, config);
+
+    // Add Via header after filtering so it is always included.
+    const via_config = headers.ViaConfig{
+        .proxy_name = config.via_proxy_name,
+        .disable_via = config.disable_via_header,
+    };
+    try headers.addViaHeader(message, req.version, via_config);
+
+    // Write request line
+    const request_line = try std.fmt.allocPrint(rt.allocator, "{s} {s} {s}\r\n", .{
+        req.method,
+        req.path,
+        req.protocol,
+    });
+    defer rt.allocator.free(request_line);
+
+    try upstream.writeAll(request_line, .none);
+    try writeHostHeader(rt, &upstream, req);
+    try upstream.writeAll("Connection: close\r\n", .none);
+
+    // Add X-Tinyproxy header with client IP if enabled
+    if (config.xtinyproxy) {
+        try writeXTinyproxyHeader(&upstream, stream.*);
+    }
+
+    // Write headers
+    for (message.header_list.items) |header| {
+        try upstream.writeAll(header.name, .none);
+        try upstream.writeAll(": ", .none);
+        try upstream.writeAll(header.value, .none);
+        try upstream.writeAll("\r\n", .none);
+    }
+    try upstream.writeAll("\r\n", .none);
+
+    // Forward request body
+    var body_reader = message.body_reader();
+    try body_reader.copy_raw_to(reader, rt, stream, &upstream);
+
+    // Process and forward response
+    try processServerResponse(
+        rt,
+        upstream,
+        stream.*,
+        config,
+        req,
+        if (is_reverse and config.reverse.reverse_magic) reverse_prefix else null,
+    );
+}
+
+/// Apply upstream proxy configuration for HTTP requests
+fn applyUpstreamProxy(
+    rt: *zio.Runtime,
+    stream: zio.net.Stream,
+    upstream: *zio.net.Stream,
+    proxy: *const upstream_mod.UpstreamProxy,
+    req: *Request,
+) !void {
+    switch (proxy.proxy_type) {
+        .http => {
+            const abs_url = try std.fmt.allocPrint(rt.allocator, "http://{s}:{d}{s}", .{ req.host, req.port, req.path });
+            rt.allocator.free(req.path);
+            req.path = abs_url;
+        },
+        .socks4, .socks5 => {
+            socks.connect(rt, upstream, proxy.proxy_type, proxy.user, proxy.pass, req.host, req.port) catch {
+                try stream.writeAll(ERROR_502, .none);
+                return RequestError.SocksHandshakeFailed;
+            };
+        },
+    }
+}
+
+/// Write X-Tinyproxy header with client IP
+fn writeXTinyproxyHeader(upstream: *zio.net.Stream, stream: zio.net.Stream) !void {
+    var ip_buf: [64]u8 = undefined;
+    const ip_str = std.fmt.bufPrint(&ip_buf, "{f}", .{stream.socket.address.ip}) catch "";
+    if (ip_str.len > 0) {
+        try upstream.writeAll("X-Tinyproxy: ", .none);
+        try upstream.writeAll(ip_str, .none);
+        try upstream.writeAll("\r\n", .none);
+    }
+}
+
+/// Handle an incoming client connection
+pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *const Config) !void {
+    var stream = client;
+    defer stream.close();
+
+    var reader = buffer.LineReader.init(rt.allocator, buffer.MAX_LINE_LENGTH);
+    defer reader.deinit();
+
+    const req_line = try reader.readLine(rt, &stream);
+    defer rt.allocator.free(req_line);
+
+    var message = try http.read_headers(rt.allocator, &reader, rt, &stream);
+    defer message.deinit();
+
+    // Check authentication if configured
+    if (!try checkAuthentication(&stream, config, &message)) {
+        return;
+    }
+
+    // Parse request with transparent proxy fallback
+    const req = try parseRequestWithTransparentFallback(rt, req_line, &message.headers, config, stream.socket.handle);
     defer free_request(rt.allocator, req);
 
     // Record request statistics
@@ -192,7 +417,6 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *cons
 
     // Check URL/domain filter
     if (config.filter_initialized and config.filter.enabled) {
-        // Build URL for filter matching
         const filter_url = try std.fmt.allocPrint(rt.allocator, "http://{s}:{d}{s}", .{ req.host, req.port, req.path });
         defer rt.allocator.free(filter_url);
 
@@ -202,156 +426,20 @@ pub fn handle_connection(rt: *zio.Runtime, client: zio.net.Stream, config: *cons
         }
     }
 
-    // Check for reverse proxy rewrite (with optional magic cookie support)
-    var is_reverse_proxy = false;
-    var reverse_path_prefix: ?[]const u8 = null;
-    if (config.reverse_initialized and config.reverse.hasMapping()) {
-        // Get cookie header for magic cookie lookup
-        const cookie_header = message.headers.get("cookie");
-        if (config.reverse.rewriteWithMagic(req.path, cookie_header)) |magic_result| {
-            const rw = magic_result.result;
-            reverse_path_prefix = magic_result.path_prefix;
-            // Rewrite the request for reverse proxy
-            // Free old host and replace with reverse target
-            rt.allocator.free(req.host);
-            req.host = try rt.allocator.dupe(u8, rw.host);
-            req.port = rw.port;
-            // Path is kept from the rewrite result (remaining after prefix)
-            rt.allocator.free(req.path);
-            req.path = try rt.allocator.dupe(u8, rw.path);
-            is_reverse_proxy = true;
-        } else if (config.reverse.reverse_only) {
-            // ReverseOnly mode: reject requests that don't match any mapping
-            try stream.writeAll(ERROR_403_REVERSE_ONLY, .none);
-            return;
-        }
-    }
+    // Check for reverse proxy rewrite
+    const cookie_header = message.headers.get("cookie");
+    const reverse_result = applyReverseProxy(rt, &stream, config, req, cookie_header) catch |err| {
+        if (err == RequestError.ReverseOnlyDenied) return;
+        return err;
+    };
 
-    // CONNECT method handling with port restrictions
+    // Route based on method
     if (std.ascii.eqlIgnoreCase(req.method, "CONNECT")) {
-        // Check if port is allowed
-        const check = connect_ports.checkConnectPort(config, req.port);
-        if (check == .denied) {
-            try stream.writeAll(ERROR_403_CONNECT, .none);
-            return;
-        }
-
-        const conn_res = try connectTarget(rt, req, config, stream.socket.handle);
-        var upstream = conn_res.stream;
-        defer upstream.close();
-
-        if (conn_res.proxy) |p| {
-            switch (p.proxy_type) {
-                .http => {
-                    const connect_cmd = try std.fmt.allocPrint(rt.allocator, "CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n\r\n", .{ req.host, req.port, req.host, req.port });
-                    defer rt.allocator.free(connect_cmd);
-                    try upstream.writeAll(connect_cmd, .none);
-
-                    var buf: [4096]u8 = undefined;
-                    const n = try upstream.read(&buf, .none);
-                    if (n == 0) return error.ProxyConnectionClosed;
-
-                    const response = buf[0..n];
-                    if (std.mem.indexOf(u8, response, " 200 ") == null) {
-                        try stream.writeAll(ERROR_502, .none);
-                        return;
-                    }
-                },
-                .socks4, .socks5 => {
-                    socks.connect(rt, &upstream, p.proxy_type, p.user, p.pass, req.host, req.port) catch {
-                        try stream.writeAll(ERROR_502, .none);
-                        return;
-                    };
-                },
-            }
-        }
-
-        try stream.writeAll("HTTP/1.1 200 Connection established\r\nProxy-agent: tinyproxy\r\n\r\n", .none);
-        _ = try reader.flush_to(rt, &upstream);
-        try relay.copy_bidi(rt, stream, upstream);
-        return;
+        return handleConnect(rt, &stream, &reader, req, config);
     }
 
     // Regular HTTP request
-    const conn_res = try connectTarget(rt, req, config, stream.socket.handle);
-    var upstream = conn_res.stream;
-    defer upstream.close();
-
-    if (conn_res.proxy) |p| {
-        switch (p.proxy_type) {
-            .http => {
-                const abs_url = try std.fmt.allocPrint(rt.allocator, "http://{s}:{d}{s}", .{ req.host, req.port, req.path });
-                rt.allocator.free(req.path);
-                req.path = abs_url;
-            },
-            .socks4, .socks5 => {
-                socks.connect(rt, &upstream, p.proxy_type, p.user, p.pass, req.host, req.port) catch {
-                    try stream.writeAll(ERROR_502, .none);
-                    return;
-                };
-            },
-        }
-    }
-
-    try appendAddHeaders(&message, config);
-
-    // Remove hop-by-hop and explicit connection headers first.
-    headers.removeHopByHop(&message);
-    // Host is sent explicitly like tinyproxy C.
-    headers.removeHeader(&message, "host");
-
-    // Apply anonymous mode filtering (only whitelist + essential).
-    anonymous.filterHeaders(&message, config);
-
-    // Add Via header after filtering so it is always included.
-    const via_config = headers.ViaConfig{
-        .proxy_name = config.via_proxy_name,
-        .disable_via = config.disable_via_header,
-    };
-    try headers.addViaHeader(&message, req.version, via_config);
-
-    const request_line = try std.fmt.allocPrint(rt.allocator, "{s} {s} {s}\r\n", .{
-        req.method,
-        req.path,
-        req.protocol,
-    });
-    defer rt.allocator.free(request_line);
-
-    try upstream.writeAll(request_line, .none);
-    try writeHostHeader(rt, &upstream, req);
-    try upstream.writeAll("Connection: close\r\n", .none);
-
-    // Add X-Tinyproxy header with client IP if enabled
-    if (config.xtinyproxy) {
-        var ip_buf: [64]u8 = undefined;
-        const ip_str = std.fmt.bufPrint(&ip_buf, "{f}", .{stream.socket.address.ip}) catch "";
-        if (ip_str.len > 0) {
-            try upstream.writeAll("X-Tinyproxy: ", .none);
-            try upstream.writeAll(ip_str, .none);
-            try upstream.writeAll("\r\n", .none);
-        }
-    }
-
-    for (message.header_list.items) |header| {
-        try upstream.writeAll(header.name, .none);
-        try upstream.writeAll(": ", .none);
-        try upstream.writeAll(header.value, .none);
-        try upstream.writeAll("\r\n", .none);
-    }
-    try upstream.writeAll("\r\n", .none);
-
-    var body_reader = message.body_reader();
-    try body_reader.copy_raw_to(&reader, rt, &stream, &upstream);
-
-    // Process and forward response with proper header handling
-    try processServerResponse(
-        rt,
-        upstream,
-        stream,
-        config,
-        req,
-        if (is_reverse_proxy and config.reverse.reverse_magic) reverse_path_prefix else null,
-    );
+    try handleHttpRequest(rt, &stream, &reader, req, config, &message, reverse_result.is_reverse, reverse_result.path_prefix);
 }
 
 /// Process server response: parse headers, remove hop-by-hop, add Via, rewrite Location/Refresh
@@ -367,7 +455,7 @@ fn processServerResponse(
     var to = client;
 
     // Read response into buffer
-    var response_reader = buffer.LineReader.init(rt.allocator, 8192);
+    var response_reader = buffer.LineReader.init(rt.allocator, buffer.MAX_LINE_LENGTH);
     defer response_reader.deinit();
 
     // Read status line
@@ -395,32 +483,10 @@ fn processServerResponse(
 
     // Inject ReverseMagic Set-Cookie if needed
     if (magic_path_prefix) |prefix| {
-        var cookie_buf: [128]u8 = undefined;
-        if (reverse.ReverseProxy.buildMagicCookie(prefix, &cookie_buf)) |cookie| {
-            const cookie_name = rt.allocator.dupe(u8, "set-cookie") catch |err| {
-                // Allocation failed - skip cookie injection
-                log.debug("Failed to allocate cookie name: {}", .{err});
-                return;
-            };
-            errdefer rt.allocator.free(cookie_name);
-
-            const cookie_value = rt.allocator.dupe(u8, cookie) catch |err| {
-                // Allocation failed - clean up and skip
-                log.debug("Failed to allocate cookie value: {}", .{err});
-                rt.allocator.free(cookie_name);
-                return;
-            };
-            errdefer rt.allocator.free(cookie_value);
-
-            resp_message.header_list.append(rt.allocator, .{ .name = cookie_name, .value = cookie_value }) catch |err| {
-                // Append failed - clean up allocations
-                log.debug("Failed to append cookie header: {}", .{err});
-                rt.allocator.free(cookie_name);
-                rt.allocator.free(cookie_value);
-                return;
-            };
-            // Ownership transferred to header_list - don't free
-        }
+        injectMagicCookie(rt, &resp_message, prefix) catch |err| {
+            log.debug("Failed to inject magic cookie: {}", .{err});
+            return err;
+        };
     }
 
     // Write status line
@@ -442,7 +508,7 @@ fn processServerResponse(
     }
 
     // Forward remaining body
-    var buf: [8192]u8 = undefined;
+    var buf: [buffer.IO_BUFFER_SIZE]u8 = undefined;
     while (true) {
         const n = try from.read(&buf, .none);
         if (n == 0) break;
@@ -485,6 +551,24 @@ fn rewriteLocationHeader(msg: *http.HttpMessage, config: *const Config, allocato
             }
         }
     }
+}
+
+/// Inject ReverseMagic Set-Cookie header into response
+fn injectMagicCookie(rt: *zio.Runtime, msg: *http.HttpMessage, path_prefix: []const u8) !void {
+    var cookie_buf: [128]u8 = undefined;
+    const cookie = reverse.ReverseProxy.buildMagicCookie(path_prefix, &cookie_buf) orelse return;
+
+    // Create header entry
+    const cookie_value = try rt.allocator.dupe(u8, cookie);
+    errdefer rt.allocator.free(cookie_value);
+
+    const cookie_name = try rt.allocator.dupe(u8, "set-cookie");
+    errdefer rt.allocator.free(cookie_name);
+
+    try msg.header_list.append(rt.allocator, .{ .name = cookie_name, .value = cookie_value });
+    try msg.headers.put(cookie_name, cookie_value);
+
+    // Ownership transferred to header_list/headers
 }
 
 fn sendStatsResponse(rt: *zio.Runtime, stream: *zio.net.Stream, config: *const Config) !void {

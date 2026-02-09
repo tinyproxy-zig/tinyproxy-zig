@@ -231,6 +231,7 @@ test "socks4a_handshake_writes_request" {
         .read_buf = &resp,
         .write_buf = &write_buf,
     };
+    // Note: read_exact doesn't actually use rt parameter, so fake pointer is safe for testing
     const dummy_rt: *zio.Runtime = @ptrFromInt(1);
 
     try connect(dummy_rt, &stream, upstream.ProxyType.socks4, null, null, "example.com", 443);

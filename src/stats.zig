@@ -194,22 +194,22 @@ pub const Stats = struct {
         const uptime_str = self.formatUptime(&uptime_buf);
 
         var active_buf: [32]u8 = undefined;
-        const active_str = std.fmt.bufPrint(&active_buf, "{d}", .{self.getActiveConnections()}) catch "0";
+        const active_str = std.fmt.bufPrint(&active_buf, "{d}", .{self.getActiveConnections()}) catch return error.BufferTooSmall;
 
         var total_conn_buf: [32]u8 = undefined;
-        const total_conn_str = std.fmt.bufPrint(&total_conn_buf, "{d}", .{self.connections_opened.load(.monotonic)}) catch "0";
+        const total_conn_str = std.fmt.bufPrint(&total_conn_buf, "{d}", .{self.connections_opened.load(.monotonic)}) catch return error.BufferTooSmall;
 
         var denied_buf: [32]u8 = undefined;
-        const denied_str = std.fmt.bufPrint(&denied_buf, "{d}", .{self.connections_denied.load(.monotonic)}) catch "0";
+        const denied_str = std.fmt.bufPrint(&denied_buf, "{d}", .{self.connections_denied.load(.monotonic)}) catch return error.BufferTooSmall;
 
         var refused_buf: [32]u8 = undefined;
-        const refused_str = std.fmt.bufPrint(&refused_buf, "{d}", .{self.connections_refused.load(.monotonic)}) catch "0";
+        const refused_str = std.fmt.bufPrint(&refused_buf, "{d}", .{self.connections_refused.load(.monotonic)}) catch return error.BufferTooSmall;
 
         var total_req_buf: [32]u8 = undefined;
-        const total_req_str = std.fmt.bufPrint(&total_req_buf, "{d}", .{self.requests_total.load(.monotonic)}) catch "0";
+        const total_req_str = std.fmt.bufPrint(&total_req_buf, "{d}", .{self.requests_total.load(.monotonic)}) catch return error.BufferTooSmall;
 
         var bad_req_buf: [32]u8 = undefined;
-        const bad_req_str = std.fmt.bufPrint(&bad_req_buf, "{d}", .{self.requests_bad.load(.monotonic)}) catch "0";
+        const bad_req_str = std.fmt.bufPrint(&bad_req_buf, "{d}", .{self.requests_bad.load(.monotonic)}) catch return error.BufferTooSmall;
 
         // Replace variables in template
         const replacements = [_]struct { pattern: []const u8, value: []const u8 }{

@@ -88,7 +88,7 @@ pub const BodyReader = struct {
             .none => return,
             .length => {
                 var remaining = self.remaining;
-                var buf: [8192]u8 = undefined;
+                var buf: [buffer.IO_BUFFER_SIZE]u8 = undefined;
                 while (remaining > 0) {
                     const to_read = @min(remaining, buf.len);
                     const n = try reader.read(rt, stream, buf[0..to_read]);
@@ -99,7 +99,7 @@ pub const BodyReader = struct {
                 self.remaining = 0;
             },
             .chunked => {
-                var buf: [8192]u8 = undefined;
+                var buf: [buffer.IO_BUFFER_SIZE]u8 = undefined;
                 while (true) {
                     const size_line = try reader.readLine(rt, stream);
                     defer reader.allocator.free(size_line);
@@ -238,7 +238,7 @@ fn content_length_server(rt: *zio.Runtime, server: *zio.net.Server) !void {
     var stream = try server.accept();
     defer stream.close();
 
-    var reader = buffer.LineReader.init(rt.allocator, 8192);
+    var reader = buffer.LineReader.init(rt.allocator, buffer.MAX_LINE_LENGTH);
     defer reader.deinit();
 
     const line = try reader.readLine(rt, &stream);
@@ -290,7 +290,7 @@ fn chunked_server(rt: *zio.Runtime, server: *zio.net.Server) !void {
     var stream = try server.accept();
     defer stream.close();
 
-    var reader = buffer.LineReader.init(rt.allocator, 8192);
+    var reader = buffer.LineReader.init(rt.allocator, buffer.MAX_LINE_LENGTH);
     defer reader.deinit();
 
     const line = try reader.readLine(rt, &stream);

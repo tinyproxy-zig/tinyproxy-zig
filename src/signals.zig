@@ -5,6 +5,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// Use C write for async-signal-safety
+const c = @cImport({
+    @cInclude("unistd.h");
+});
+
 /// Signal flags
 var reload_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var rotate_log_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -48,7 +53,12 @@ pub fn setup() !void {
     wakeup_pipe = try std.posix.pipe();
 
     // Set write end to non-blocking (O_NONBLOCK = 0x0004 is standardized)
-    _ = std.posix.fcntl(wakeup_pipe[1], std.posix.F.SETFL, 0x0004) catch {};
+    const write_flags = std.posix.fcntl(wakeup_pipe[1], std.posix.F.GETFL, 0) catch unreachable;
+    _ = std.posix.fcntl(wakeup_pipe[1], std.posix.F.SETFL, write_flags | 0x0004) catch {};
+
+    // Also set read end to non-blocking
+    const read_flags = std.posix.fcntl(wakeup_pipe[0], std.posix.F.GETFL, 0) catch unreachable;
+    _ = std.posix.fcntl(wakeup_pipe[0], std.posix.F.SETFL, read_flags | 0x0004) catch {};
 
     const empty_mask = std.posix.sigemptyset();
 
@@ -112,21 +122,26 @@ pub fn cleanup() void {
     std.posix.close(wakeup_pipe[1]);
 }
 
+/// Write a single byte to the wakeup pipe (async-signal-safe)
 fn writeWakeup() void {
-    _ = std.posix.write(wakeup_pipe[1], &[_]u8{1}) catch {};
+    const byte = [_]u8{1};
+    _ = c.write(wakeup_pipe[1], &byte, 1);
 }
 
-fn handleSighup(_: c_int) callconv(.c) void {
+fn handleSighup(sig: c_int) callconv(.c) void {
+    _ = sig;
     reload_flag.store(true, .seq_cst);
     writeWakeup();
 }
 
-fn handleSigusr1(_: c_int) callconv(.c) void {
+fn handleSigusr1(sig: c_int) callconv(.c) void {
+    _ = sig;
     rotate_log_flag.store(true, .seq_cst);
     writeWakeup();
 }
 
-fn handleSigterm(_: c_int) callconv(.c) void {
+fn handleSigterm(sig: c_int) callconv(.c) void {
+    _ = sig;
     shutdown_flag.store(true, .seq_cst);
     writeWakeup();
 }

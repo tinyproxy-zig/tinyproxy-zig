@@ -1,18 +1,29 @@
 //! HTTP Basic Authentication Module for tinyproxy-zig
 //!
 //! Implements RFC 7617 HTTP Basic Authentication.
-//! Supports multiple username/password pairs.
+//! Supports multiple username/password pairs with optional password hashing.
 //!
 //! Usage:
 //!   var auth = BasicAuth.init(allocator);
 //!   defer auth.deinit();
 //!   try auth.addUser("user", "password");
+//!   try auth.addUserHashed("admin", "{SHA256}hashed_password_here");
 //!   if (!auth.verify(auth_header)) {
 //!       try sendAuthRequired(stream, rt, auth.realm);
 //!       return;
 //!   }
 
 const std = @import("std");
+
+const SHA256_DIGEST_LENGTH = 32;
+
+/// Password storage format
+const PasswordFormat = enum {
+    /// Plain text password (default, backward compatible)
+    plain,
+    /// SHA-256 hash in hex format: {SHA256}hexstring
+    sha256,
+};
 
 /// HTTP Basic Authentication handler
 pub const BasicAuth = struct {
@@ -44,7 +55,7 @@ pub const BasicAuth = struct {
         self.realm_owned = true;
     }
 
-    /// Add a username/password pair
+    /// Add a username/password pair (plain text, backward compatible)
     pub fn addUser(self: *Self, user: []const u8, pass: []const u8) !void {
         const user_duped = try self.allocator.dupe(u8, user);
         errdefer self.allocator.free(user_duped);
@@ -61,6 +72,61 @@ pub const BasicAuth = struct {
         try self.credentials.put(user_duped, pass_duped);
     }
 
+    /// Add a username with pre-hashed password (SHA-256 hex format)
+    /// Hash format: {SHA256}hex_digest
+    pub fn addUserHashed(self: *Self, user: []const u8, hashed_pass: []const u8) !void {
+        const user_duped = try self.allocator.dupe(u8, user);
+        errdefer self.allocator.free(user_duped);
+
+        const pass_duped = try self.allocator.dupe(u8, hashed_pass);
+        errdefer self.allocator.free(pass_duped);
+
+        // Remove old entry if exists
+        if (self.credentials.fetchRemove(user_duped)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
+
+        try self.credentials.put(user_duped, pass_duped);
+    }
+
+    /// Add a username/password pair and store as SHA-256 hash
+    pub fn addUserWithHash(self: *Self, user: []const u8, pass: []const u8) !void {
+        const hash = try self.hashPassword(pass);
+        errdefer self.allocator.free(hash);
+
+        const user_duped = try self.allocator.dupe(u8, user);
+        errdefer self.allocator.free(user_duped);
+
+        // Remove old entry if exists
+        if (self.credentials.fetchRemove(user_duped)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
+
+        // hash ownership is transferred to the hashmap
+        try self.credentials.put(user_duped, hash);
+    }
+
+    /// Hash a password using SHA-256
+    /// Returns: {SHA256}hex_digest format
+    fn hashPassword(self: *Self, password: []const u8) ![]u8 {
+        var digest: [SHA256_DIGEST_LENGTH]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(password, &digest, .{});
+
+        // Format: {SHA256} + hex digest (64 chars)
+        const formatted = try self.allocator.alloc(u8, 8 + SHA256_DIGEST_LENGTH * 2);
+        @memcpy(formatted[0..8], "{SHA256}");
+
+        // Convert digest to hex string manually
+        const hex_chars = "0123456789abcdef";
+        for (digest, 0..) |byte, i| {
+            formatted[8 + i * 2] = hex_chars[byte >> 4];
+            formatted[8 + i * 2 + 1] = hex_chars[byte & 0x0f];
+        }
+        return formatted;
+    }
+
     /// Check if any credentials are configured
     pub fn hasCredentials(self: *const Self) bool {
         return self.credentials.count() > 0;
@@ -69,6 +135,7 @@ pub const BasicAuth = struct {
     /// Verify the Authorization header
     /// Returns true if valid credentials, false otherwise
     /// Uses constant-time comparison to prevent timing attacks
+    /// Supports both plain text and SHA-256 hashed passwords
     pub fn verify(self: *const Self, auth_header: ?[]const u8) bool {
         const header = auth_header orelse return false;
 
@@ -92,10 +159,48 @@ pub const BasicAuth = struct {
 
         // Verify credentials using constant-time comparison
         if (self.credentials.get(user)) |stored_pass| {
-            return cryptoEq(u8, pass, stored_pass);
+            return verifyPassword(stored_pass, pass);
         }
 
         return false;
+    }
+
+    /// Verify a password against stored value (plain or hashed)
+    fn verifyPassword(stored: []const u8, provided: []const u8) bool {
+        const format = detectPasswordFormat(stored);
+
+        return switch (format) {
+            .plain => cryptoEq(u8, provided, stored),
+            .sha256 => {
+                // stored format: {SHA256}hex_digest
+                if (stored.len < 9) return false; // {SHA256} + at least 1 char
+
+                var digest: [SHA256_DIGEST_LENGTH]u8 = undefined;
+                std.crypto.hash.sha2.Sha256.hash(provided, &digest, .{});
+
+                const hex_digest = stored[8..];
+                if (hex_digest.len != SHA256_DIGEST_LENGTH * 2) return false;
+
+                // Constant-time hex comparison
+                var i: usize = 0;
+                var result: u8 = 0;
+                while (i < SHA256_DIGEST_LENGTH) : (i += 1) {
+                    const upper = std.fmt.charToDigit(hex_digest[i * 2], 16) catch return false;
+                    const lower = std.fmt.charToDigit(hex_digest[i * 2 + 1], 16) catch return false;
+                    const stored_byte = (upper << 4) | lower;
+                    result |= digest[i] ^ stored_byte;
+                }
+                return result == 0;
+            },
+        };
+    }
+
+    /// Detect password format from stored value
+    fn detectPasswordFormat(stored: []const u8) PasswordFormat {
+        if (std.mem.startsWith(u8, stored, "{SHA256}")) {
+            return .sha256;
+        }
+        return .plain;
     }
 
     /// Constant-time equality check to prevent timing attacks
@@ -261,4 +366,54 @@ test "BasicAuth hasCredentials" {
     try auth.addUser("user", "pass");
 
     try std.testing.expect(auth.hasCredentials());
+}
+
+test "BasicAuth SHA-256 hashed password" {
+    var auth = BasicAuth.init(std.testing.allocator);
+    defer auth.deinit();
+
+    // Add user with SHA-256 hashed password
+    // Hash of "secret123": fcf730b6d95236ecd3c9fc2d92d7b6b2bb061514961aec041d6c7a7192f592e4
+    try auth.addUserHashed("alice", "{SHA256}fcf730b6d95236ecd3c9fc2d92d7b6b2bb061514961aec041d6c7a7192f592e4");
+
+    // base64 of "alice:secret123"
+    try std.testing.expect(auth.verify("Basic YWxpY2U6c2VjcmV0MTIz"));
+
+    // Wrong password
+    try std.testing.expect(!auth.verify("Basic YWxpY2U6d3JvbmdwYXNz"));
+}
+
+test "BasicAuth addUserWithHash" {
+    var auth = BasicAuth.init(std.testing.allocator);
+    defer auth.deinit();
+
+    try auth.addUserWithHash("bob", "password123");
+
+    // base64 of "bob:password123"
+    try std.testing.expect(auth.verify("Basic Ym9iOnBhc3N3b3JkMTIz"));
+
+    // Wrong password
+    try std.testing.expect(!auth.verify("Basic Ym9iOnBhc3N3b3Jk"));
+}
+
+test "BasicAuth mixed plain and hashed passwords" {
+    var auth = BasicAuth.init(std.testing.allocator);
+    defer auth.deinit();
+
+    // Plain text password
+    try auth.addUser("plain_user", "plain_pass");
+
+    // Hashed password (hash of "hash_pass")
+    // 4c3c07ef6d98b08f7099dac843f0d556de7e42d133b9505c20444fd70b34e500
+    try auth.addUserHashed("hash_user", "{SHA256}4c3c07ef6d98b08f7099dac843f0d556de7e42d133b9505c20444fd70b34e500");
+
+    // base64 of "plain_user:plain_pass"
+    try std.testing.expect(auth.verify("Basic cGxhaW5fdXNlcjpwbGFpbl9wYXNz"));
+
+    // base64 of "hash_user:hash_pass"
+    try std.testing.expect(auth.verify("Basic aGFzaF91c2VyOmhhc2hfcGFzcw=="));
+
+    // Wrong passwords should fail
+    try std.testing.expect(!auth.verify("Basic cGxhaW5fdXNlcjp3cm9uZw=="));
+    try std.testing.expect(!auth.verify("Basic aGFzaF91c2VyOndyb25n"));
 }

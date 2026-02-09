@@ -1,5 +1,6 @@
 const std = @import("std");
 const zio = @import("zio");
+const buffer = @import("buffer.zig");
 
 test "relay copies both directions" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -46,7 +47,7 @@ test "relay copies both directions" {
 pub fn copy_one(_: *zio.Runtime, src: zio.net.Stream, dst: zio.net.Stream) !void {
     var from = src;
     var to = dst;
-    var buf: [8192]u8 = undefined;
+    var buf: [buffer.IO_BUFFER_SIZE]u8 = undefined;
     while (true) {
         const n = try from.read(&buf, .none);
         if (n == 0) break;
@@ -59,23 +60,24 @@ pub fn copy_bidi(rt: *zio.Runtime, a: zio.net.Stream, b: zio.net.Stream) !void {
     var a_to_b = try rt.spawn(copy_one, .{ rt, a, b });
     var b_to_a = try rt.spawn(copy_one, .{ rt, b, a });
 
-    // Wait for both to complete, but if one fails, cancel the other
-    // This prevents hanging when one direction closes
+    // Wait for both to complete
+    // When one direction completes (successfully or with error), the other
+    // will get a read/write error on the closed socket and exit quickly.
     var a_err: ?anyerror = null;
     var b_err: ?anyerror = null;
 
-    // First wait for a_to_b
+    // Wait for a_to_b first
     a_to_b.join() catch |err| {
         a_err = err;
     };
 
-    // Then wait for b_to_a
+    // Now wait for b_to_a - it should complete quickly since a side is done
     b_to_a.join() catch |err| {
         b_err = err;
     };
 
     // Return first non-EndOfStream error if any
-    // EndOfStream is expected when one side closes connection
+    // EndOfStream is expected when one side closes connection normally
     if (a_err) |err| {
         if (err != error.EndOfStream) return err;
     }

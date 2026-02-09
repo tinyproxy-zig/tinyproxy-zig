@@ -1,6 +1,15 @@
 const std = @import("std");
 const zio = @import("zio");
 
+/// Default buffer size for line reading (4KB)
+pub const DEFAULT_BUFFER_SIZE: usize = 4096;
+
+/// Maximum line length for HTTP headers (prevents DoS via large headers)
+pub const MAX_LINE_LENGTH: usize = 8192;
+
+/// Buffer size for I/O operations (8KB)
+pub const IO_BUFFER_SIZE: usize = 8192;
+
 pub const LineReader = struct {
     allocator: std.mem.Allocator,
     max_len: usize,

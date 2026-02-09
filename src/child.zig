@@ -12,6 +12,7 @@ const socket = @import("socket.zig");
 const stats = @import("stats.zig");
 
 const log = std.log.scoped(.@"tinyproxy/child");
+const builtin = @import("builtin");
 
 /// Error response for denied connections
 const ERROR_403_DENIED = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 20\r\nConnection: close\r\n\r\nAccess denied by ACL";
@@ -39,41 +40,91 @@ pub fn listen_socket(_: *zio.Runtime, config: *Config) !void {
     }
 }
 
+/// Accept with signal-aware blocking using the self-pipe trick
+/// Returns null if shutdown was requested
+fn acceptWithSignalCheck() !?zio.net.Stream {
+    if (builtin.os.tag == .windows) {
+        return server.accept() catch |err| {
+            if (err == error.Canceled) return null;
+            return err;
+        };
+    }
+
+    const listen_fd = server.socket.handle;
+    const wakeup_fd = signals.wakeupFd();
+
+    // Ensure listening socket is non-blocking (idempotent)
+    {
+        const flags = std.posix.fcntl(listen_fd, std.posix.F.GETFL, 0) catch |err| {
+            log.err("Failed to get socket flags: {}", .{err});
+            return error.SocketFailed;
+        };
+        _ = std.posix.fcntl(listen_fd, std.posix.F.SETFL, flags | 0x0004) catch {}; // O_NONBLOCK
+    }
+
+    while (true) {
+        if (signals.shouldShutdown()) return null;
+
+        // Poll: listen socket OR wakeup pipe
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = listen_fd, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = wakeup_fd, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+
+        // 1 second timeout for periodic shutdown checks
+        const rc = std.posix.poll(&fds, 1000) catch |err| {
+            log.err("poll failed: {}", .{err});
+            return error.PollFailed;
+        };
+
+        if (rc == 0) continue; // Timeout, check shutdown again
+
+        // Signal received?
+        if (fds[1].revents != 0) {
+            signals.drainWakeupPipe();
+            if (signals.shouldShutdown()) return null;
+            continue; // SIGHUP/SIGUSR1, keep accepting
+        }
+
+        // Incoming connection?
+        if (fds[0].revents != 0) {
+            var peer_addr: std.posix.sockaddr = undefined;
+            var peer_addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+
+            const client_fd = std.posix.accept(listen_fd, &peer_addr, &peer_addr_len, 0) catch |err| {
+                if (err == error.WouldBlock) continue; // Spurious wakeup
+                return err;
+            };
+
+            // Get peer address for zio stream
+            var addr_buf: [@sizeOf(std.net.Address)]u8 = undefined;
+            var addr_len: std.posix.socklen_t = @sizeOf(std.net.Address);
+            std.posix.getpeername(client_fd, @ptrCast(&addr_buf), &addr_len) catch {};
+
+            const std_addr = @as(*align(1) const std.net.Address, @ptrCast(&addr_buf)).*;
+            const zio_addr = zio.net.Address.fromStd(std_addr);
+
+            return zio.net.Stream{
+                .socket = .{
+                    .handle = client_fd,
+                    .address = zio_addr,
+                },
+            };
+        }
+    }
+}
+
 pub fn main_loop(rt: *zio.Runtime, config: *Config, config_path: []const u8) !void {
     _ = config_path; // Unused for now (needed for config reload support)
     log.info("main_loop: starting main loop", .{});
 
-    // Simple accept loop using zio's async accept
-    // We'll periodically check for shutdown by using a timeout
-    // For now, we'll rely on the runtime's cancellation mechanism
-
     while (true) {
-        // Check for shutdown before accepting
-        if (signals.shouldShutdown()) {
+        // Accept with signal-aware blocking
+        const stream_opt = try acceptWithSignalCheck();
+        const stream = stream_opt orelse {
             log.info("Shutdown requested, exiting...", .{});
             break;
-        }
-
-        // Accept connection - this will yield to the runtime while waiting
-        const stream = server.accept() catch |err| {
-            if (err == error.Canceled) {
-                log.info("Task cancelled, shutting down...", .{});
-                return error.Canceled;
-            }
-            log.err("Accept failed: {}", .{err});
-            // Yield before retrying to allow other tasks to run
-            try rt.yield();
-            continue;
         };
-
-        log.info("Connection accepted from {f}", .{stream.socket.address.ip});
-
-        // Check shutdown after accept
-        if (signals.shouldShutdown()) {
-            log.info("Shutdown requested, closing connection and exiting...", .{});
-            stream.close();
-            break;
-        }
 
         stats.global.recordOpen();
 
@@ -113,7 +164,6 @@ pub fn main_loop(rt: *zio.Runtime, config: *Config, config_path: []const u8) !vo
         // Increment active connections (use monotonic modification for consistency)
         _ = active_connections.fetchAdd(1, .monotonic);
 
-        log.info("Spawning connection handler...", .{});
         // Spawn connection handler
         _ = try rt.spawn(handleConnectionWithCounter, .{ rt, stream, config });
 
@@ -126,9 +176,7 @@ pub fn main_loop(rt: *zio.Runtime, config: *Config, config_path: []const u8) !vo
 
 /// Wrapper that handles connection and decrements counter on completion
 fn handleConnectionWithCounter(rt: *zio.Runtime, stream: zio.net.Stream, config: *const Config) void {
-    log.info("handleConnectionWithCounter: starting connection handler", .{});
     defer {
-        log.info("handleConnectionWithCounter: connection done", .{});
         _ = active_connections.fetchSub(1, .monotonic);
         stats.global.recordClose();
     }

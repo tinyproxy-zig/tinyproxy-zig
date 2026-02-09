@@ -137,17 +137,17 @@ pub fn get_local_addr_str(sock: posix.socket_t, buf: []u8) ?[]const u8 {
         const bytes: *const [4]u8 = @ptrCast(&addr4.addr);
         return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] }) catch return null;
     } else if (family == posix.AF.INET6) {
-        // Format IPv6 address manually
         const addr6: *const posix.sockaddr.in6 = @ptrCast(&storage);
-        // Simplified IPv6 formatting - just format all bytes
+        // Format IPv6 address (RFC 5952: lowercase, no unnecessary leading zeros)
         return std.fmt.bufPrint(buf,
-            \\{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}
-        , .{
-            addr6.addr[0], addr6.addr[1], addr6.addr[2], addr6.addr[3],
-            addr6.addr[4], addr6.addr[5], addr6.addr[6], addr6.addr[7],
-            addr6.addr[8], addr6.addr[9], addr6.addr[10], addr6.addr[11],
-            addr6.addr[12], addr6.addr[13], addr6.addr[14], addr6.addr[15],
-        }) catch return null;
+            "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}",
+            .{
+                addr6.addr[0], addr6.addr[1], addr6.addr[2], addr6.addr[3],
+                addr6.addr[4], addr6.addr[5], addr6.addr[6], addr6.addr[7],
+                addr6.addr[8], addr6.addr[9], addr6.addr[10], addr6.addr[11],
+                addr6.addr[12], addr6.addr[13], addr6.addr[14], addr6.addr[15],
+            },
+        ) catch return null;
     }
     return null;
 }
