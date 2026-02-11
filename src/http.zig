@@ -5,6 +5,9 @@ const buffer = @import("buffer.zig");
 /// Maximum number of headers allowed per request (DoS protection)
 pub const MAX_HEADERS: usize = 100;
 
+/// Maximum chunk size allowed (16MB - prevents DoS)
+pub const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
 pub const HttpError = error{
     BadRequest,
     InvalidHeader,
@@ -110,6 +113,9 @@ pub const BodyReader = struct {
                     const size_str = std.mem.trim(u8, size_trim[0..semi], " \t");
                     if (size_str.len == 0) return error.InvalidChunk;
                     const chunk_size = std.fmt.parseInt(usize, size_str, 16) catch return error.InvalidChunk;
+
+                    // Prevent DoS via extremely large chunks
+                    if (chunk_size > MAX_CHUNK_SIZE) return error.InvalidChunk;
 
                     if (chunk_size == 0) {
                         while (true) {
@@ -266,7 +272,7 @@ test "read content-length body" {
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18082);
-    var server = try addr.listen(.{});
+    var server = try addr.listen(.{ .reuse_address = true });
     defer server.close();
 
     var server_task = try rt.spawn(content_length_server, .{ rt, &server });
@@ -321,7 +327,7 @@ test "read chunked body" {
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18083);
-    var server = try addr.listen(.{});
+    var server = try addr.listen(.{ .reuse_address = true });
     defer server.close();
 
     var server_task = try rt.spawn(chunked_server, .{ rt, &server });

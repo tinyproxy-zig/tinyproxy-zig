@@ -149,7 +149,12 @@ fn setgroups(gid: posix.gid_t) !void {
     });
 
     const groups = [_]posix.gid_t{gid};
-    if (c.setgroups(1, &groups) != 0) {
+    const rc = c.setgroups(1, &groups);
+    if (rc != 0) {
+        // EPERM can happen when already dropped privileges - ignore
+        // Also silently ignore EINVAL (on some systems when gid == current gid)
+        const errno: std.c.E = @enumFromInt(std.c._errno().*);
+        if (errno == .PERM or errno == .INVAL) return;
         return error.SetgidFailed;
     }
 }

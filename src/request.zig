@@ -21,12 +21,16 @@ const log = std.log.scoped(.@"tinyproxy/request");
 const HTTP_PORT: u16 = 80;
 const HTTPS_PORT: u16 = 443;
 
+/// Maximum hostname length per RFC 1035 (253 chars) and practical limits
+const MAX_HOSTNAME_LENGTH: usize = 253;
+
 /// Additional errors for request handling
 pub const RequestError = error{
     ReverseOnlyDenied,
     SocksHandshakeFailed,
     ProxyConnectionClosed,
     ProxyTunnelFailed,
+    HostnameTooLong,
 };
 
 pub const Request = struct {
@@ -56,11 +60,15 @@ fn sendErrorResponse(
     if (config.error_files.get(@intFromEnum(err))) |error_file| {
         if (loadErrorFile(rt.allocator, error_file)) |content| {
             defer rt.allocator.free(content);
-            var header_buf: [256]u8 = undefined;
+            var header_buf: [512]u8 = undefined;
             const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {s}\r\nContent-Type: text/html\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{
                 err.statusLine(),
                 content.len,
-            }) catch unreachable;
+            }) catch {
+                // Buffer too small, use simpler response
+                try stream.writeAll("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n", .none);
+                return;
+            };
             try stream.writeAll(header, .none);
             try stream.writeAll(content, .none);
             return;
@@ -71,11 +79,15 @@ fn sendErrorResponse(
     if (config.default_error_file) |default_file| {
         if (loadErrorFile(rt.allocator, default_file)) |content| {
             defer rt.allocator.free(content);
-            var header_buf: [256]u8 = undefined;
+            var header_buf: [512]u8 = undefined;
             const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {s}\r\nContent-Type: text/html\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{
                 err.statusLine(),
                 content.len,
-            }) catch unreachable;
+            }) catch {
+                // Buffer too small, use simpler response
+                try stream.writeAll("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n", .none);
+                return;
+            };
             try stream.writeAll(header, .none);
             try stream.writeAll(content, .none);
             return;
@@ -94,11 +106,15 @@ fn sendErrorResponse(
     };
     defer rt.allocator.free(body);
 
-    var header_buf: [256]u8 = undefined;
+    var header_buf: [512]u8 = undefined;
     const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{
         err.statusLine(),
         body.len,
-    }) catch unreachable;
+    }) catch {
+        // Buffer too small, use simpler response
+        try stream.writeAll("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n", .none);
+        return;
+    };
     try stream.writeAll(header, .none);
     try stream.writeAll(body, .none);
 }
@@ -579,8 +595,12 @@ fn sendStatsResponse(rt: *zio.Runtime, stream: *zio.net.Stream, config: *const C
         try stats.global.renderHtml(rt.allocator);
     defer rt.allocator.free(body);
 
-    var header_buf: [256]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len}) catch unreachable;
+    var header_buf: [512]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len}) catch {
+        // Buffer too small, shouldn't happen with this size
+        try stream.writeAll("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n", .none);
+        return;
+    };
 
     try stream.writeAll(header, .none);
     try stream.writeAll(body, .none);
@@ -605,7 +625,8 @@ fn writeHostHeader(_: *zio.Runtime, upstream: *zio.net.Stream, req: *const Reque
 
 fn strip_username_password(host: []u8) usize {
     const at_pos = std.mem.indexOf(u8, host, "@") orelse return host.len;
-    if (at_pos + 1 >= host.len) return host.len; // Bounds check
+    // @ is the last character — nothing after it to keep
+    if (at_pos + 1 >= host.len) return host.len;
     const src_start = at_pos + 1;
     const bytes_to_copy = host.len - src_start;
     std.mem.copyForwards(u8, host[0..bytes_to_copy], host[src_start..]);
@@ -629,6 +650,11 @@ fn extract_url(allocator: std.mem.Allocator, url: []const u8, default_port: u16,
 
     const host_part = if (slash_pos) |pos| url[0..pos] else url;
     const path_part = if (slash_pos) |pos| url[pos..] else "/";
+
+    // Validate hostname length to prevent DoS
+    if (host_part.len > MAX_HOSTNAME_LENGTH) {
+        return error.HostnameTooLong;
+    }
 
     var host_buffer = try allocator.dupe(u8, host_part);
     errdefer allocator.free(host_buffer);

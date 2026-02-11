@@ -9,7 +9,7 @@ test "relay copies both directions" {
     defer rt.deinit();
 
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 19001);
-    var server = try addr.listen(.{});
+    var server = try addr.listen(.{ .reuse_address = true });
     defer server.close();
 
     var ready = zio.ResetEvent.init;

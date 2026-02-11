@@ -300,9 +300,17 @@ pub const Config = struct {
     // Anonymous Mode Helpers
     // ========================================================================
 
+    /// Maximum number of anonymous headers allowed (DoS prevention)
+    const MAX_ANONYMOUS_HEADERS: usize = 100;
+
     /// Add a header to the anonymous whitelist
     /// Uses lowercase for case-insensitive matching
     pub fn allowAnonymousHeader(self: *Self, header: []const u8) !void {
+        // Check maximum number of headers to prevent DoS
+        if (self.anonymous_headers.count() >= MAX_ANONYMOUS_HEADERS) {
+            return error.TooManyHeaders;
+        }
+
         // HTTP/1.1 spec limits header names to 8192 bytes (practical limit)
         // Use stack buffer for common cases, fall back to heap for long headers
         if (header.len <= 512) {

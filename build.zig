@@ -160,6 +160,12 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
 
+    // Network tests share buffer.zig test ports (18081, 18084, 18085)
+    // via transitive imports, so they must run sequentially.
+    http_run.step.dependOn(&child_run.step);
+    relay_run.step.dependOn(&http_run.step);
+    main_run.step.dependOn(&relay_run.step);
+
     test_step.dependOn(&child_run.step);
     test_step.dependOn(&proxy_run.step);
     test_step.dependOn(&relay_run.step);

@@ -90,7 +90,7 @@ pub const LineReader = struct {
 
 fn server_task(rt: *zio.Runtime, ready: *zio.ResetEvent) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18081);
-    var server = try addr.listen(.{});
+    var server = try addr.listen(.{ .reuse_address = true });
     defer server.close();
     ready.set();
 
@@ -126,7 +126,7 @@ test "line reader reads one line" {
 
 fn server_read_buffered(rt: *zio.Runtime, ready: *zio.ResetEvent) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18084);
-    var server = try addr.listen(.{});
+    var server = try addr.listen(.{ .reuse_address = true });
     defer server.close();
     ready.set();
 
@@ -165,7 +165,7 @@ test "line reader reads buffered bytes" {
 
 fn server_read_exact(rt: *zio.Runtime, ready: *zio.ResetEvent) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 18085);
-    var server = try addr.listen(.{});
+    var server = try addr.listen(.{ .reuse_address = true });
     defer server.close();
     ready.set();
 

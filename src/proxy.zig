@@ -3,7 +3,7 @@ const zio = @import("zio");
 
 fn upstream(_: *zio.Runtime, ready: *zio.ResetEvent) !void {
     const addr = try zio.net.IpAddress.parseIp4("127.0.0.1", 19000);
-    var server = try addr.listen(.{});
+    var server = try addr.listen(.{ .reuse_address = true });
     defer server.close();
     ready.set();
 
