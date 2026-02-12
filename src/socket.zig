@@ -6,111 +6,36 @@ const zio = @import("zio");
 
 const Config = @import("config.zig").Config;
 
-// Note: opensock was a placeholder for upstream proxy binding.
-// It's no longer used as binding is handled by connectWithBind.
-// Kept for API compatibility if needed.
+const log = std.log.scoped(.socket);
 
 /// Connect to target with optional local address binding.
+/// Uses zio's async connect — does not block the coroutine runtime.
 /// If bind_addr is provided, the socket is bound to that local address before connecting.
 pub fn connectWithBind(
-    rt: *zio.Runtime,
+    _: *zio.Runtime,
     target_addr: zio.net.IpAddress,
     bind_addr: ?[]const u8,
 ) !zio.net.Stream {
-    // If no bind address, use standard connect
-    if (bind_addr == null) {
-        return target_addr.connect(.{});
+    // If no bind address, use standard async connect
+    const bind_ip = bind_addr orelse return target_addr.connect(.{});
+
+    // Open socket matching target address family
+    var socket = try zio.net.Socket.open(.stream, .fromPosix(target_addr.any.family), .ip);
+    errdefer socket.close();
+
+    // Parse and bind to local address (port 0 = OS assigns ephemeral port)
+    if (zio.net.IpAddress.parseIp(bind_ip, 0)) |local_addr| {
+        socket.bind(.{ .ip = local_addr }) catch |err| {
+            log.warn("Failed to bind to '{s}': {}, connecting without bind", .{ bind_ip, err });
+        };
+    } else |_| {
+        log.warn("Failed to parse bind address '{s}', connecting without bind", .{bind_ip});
     }
 
-    const bind_ip = bind_addr.?;
+    // Async connect via zio event loop — yields to other coroutines while waiting
+    try socket.connect(.{ .ip = target_addr }, .{});
 
-    // Determine address family from target
-    const family: posix.sa_family_t = target_addr.any.family;
-
-    // Create socket
-    const sock = try posix.socket(family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-    errdefer posix.close(sock);
-
-    // Parse and bind to local address
-    const local_addr = zio.net.IpAddress.parseIp(bind_ip, 0) catch {
-        // If parsing fails, log and proceed without bind
-        std.log.scoped(.socket).warn("Failed to parse bind address '{s}', connecting without bind", .{bind_ip});
-        return connectSocket(rt, sock, target_addr);
-    };
-
-    // Bind to local address (port 0 = OS assigns ephemeral port)
-    const bind_sockaddr: *const posix.sockaddr = @ptrCast(&local_addr.any);
-    const bind_len: posix.socklen_t = if (family == posix.AF.INET6) @sizeOf(posix.sockaddr.in6) else @sizeOf(posix.sockaddr.in);
-    posix.bind(sock, bind_sockaddr, bind_len) catch |err| {
-        // Bind failure is non-fatal, log and continue without bind
-        std.log.scoped(.socket).warn("Failed to bind to '{s}': {}, connecting without bind", .{ bind_ip, err });
-        return connectSocket(rt, sock, target_addr);
-    };
-
-    return connectSocket(rt, sock, target_addr);
-}
-
-fn connectSocket(_: *zio.Runtime, sock: posix.socket_t, target_addr: zio.net.IpAddress) !zio.net.Stream {
-    const target_sockaddr: *const posix.sockaddr = @ptrCast(&target_addr.any);
-    const family = target_addr.any.family;
-    const addr_len: posix.socklen_t = if (family == posix.AF.INET6) @sizeOf(posix.sockaddr.in6) else @sizeOf(posix.sockaddr.in);
-
-    // Set non-blocking for async connect
-    try set_socket_nonblocking(sock);
-
-    // Initiate async connect
-    posix.connect(sock, target_sockaddr, addr_len) catch |err| switch (err) {
-        error.WouldBlock => {
-            // Connection in progress, wait for it using poll
-            var pollfd = [_]posix.pollfd{.{
-                .fd = sock,
-                .events = posix.POLL.OUT,
-                .revents = 0,
-            }};
-
-            // Poll with timeout (30 seconds)
-            const result = posix.poll(&pollfd, 30000) catch |poll_err| {
-                posix.close(sock);
-                return poll_err;
-            };
-
-            if (result == 0) {
-                posix.close(sock);
-                return error.ConnectionTimedOut;
-            }
-
-            // Check for errors
-            if (pollfd[0].revents & posix.POLL.ERR != 0) {
-                posix.close(sock);
-                return error.ConnectionRefused;
-            }
-
-            // Check socket error using getsockopt
-            var so_error: c_int = 0;
-            posix.getsockopt(sock, posix.SOL.SOCKET, posix.SO.ERROR, @as([*]u8, @ptrCast(&so_error))[0..@sizeOf(c_int)]) catch {
-                posix.close(sock);
-                return error.ConnectionRefused;
-            };
-
-            if (so_error != 0) {
-                posix.close(sock);
-                return error.ConnectionRefused;
-            }
-        },
-        else => {
-            posix.close(sock);
-            return err;
-        },
-    };
-
-    // Keep socket non-blocking for zio async I/O
-    // Wrap in zio Stream
-    return .{
-        .socket = .{
-            .handle = sock,
-            .address = .{ .ip = target_addr },
-        },
-    };
+    return .{ .socket = socket };
 }
 
 /// get peer (remote) address from the socket
@@ -174,14 +99,3 @@ pub fn set_socket_blocking(sock: posix.socket_t) !void {
     _ = try posix.fcntl(sock, posix.F.SETFL, new_flags);
 }
 
-/// set the socket to non-blocking
-pub fn set_socket_nonblocking(sock: posix.socket_t) !void {
-    const flags = try posix.fcntl(sock, posix.F.GETFL, 0);
-
-    // reinterpret the flags into posix.O, set NONBLOCK, and cast back to usize
-    var oflags: posix.O = @bitCast(@as(u32, @intCast(flags)));
-    oflags.NONBLOCK = true;
-    const new_flags: usize = @intCast(@as(u32, @bitCast(oflags)));
-
-    _ = try posix.fcntl(sock, posix.F.SETFL, new_flags);
-}

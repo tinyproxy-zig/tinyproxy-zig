@@ -132,10 +132,11 @@ pub const BasicAuth = struct {
         return self.credentials.count() > 0;
     }
 
-    /// Verify the Authorization header
-    /// Returns true if valid credentials, false otherwise
-    /// Uses constant-time comparison to prevent timing attacks
-    /// Supports both plain text and SHA-256 hashed passwords
+    /// Verify the Authorization header.
+    /// Returns true if valid credentials, false otherwise.
+    /// Uses constant-time comparison to prevent timing attacks.
+    /// Performs a dummy password check on unknown usernames to prevent
+    /// timing-based username enumeration.
     pub fn verify(self: *const Self, auth_header: ?[]const u8) bool {
         const header = auth_header orelse return false;
 
@@ -147,52 +148,60 @@ pub const BasicAuth = struct {
         const encoded = std.mem.trim(u8, header[6..], " \t");
         if (encoded.len == 0) return false;
 
-        // Decode Base64 with larger buffer for long credentials
-        // Base64 encoded data is 4/3 the size of decoded, so max input is ~4300 bytes
+        // Decode Base64 using standard library decoder
         var decoded_buf: [4096]u8 = undefined;
-        const decoded = base64Decode(encoded, &decoded_buf) catch return false;
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return false;
+        if (decoded_len > decoded_buf.len) return false;
+        std.base64.standard.Decoder.decode(decoded_buf[0..decoded_len], encoded) catch return false;
+        const decoded = decoded_buf[0..decoded_len];
 
         // Split into user:password
         const colon_pos = std.mem.indexOfScalar(u8, decoded, ':') orelse return false;
         const user = decoded[0..colon_pos];
         const pass = decoded[colon_pos + 1 ..];
 
-        // Verify credentials using constant-time comparison
+        // Verify credentials using constant-time comparison.
+        // When user is not found, still run a dummy verification to prevent
+        // timing-based username enumeration.
         if (self.credentials.get(user)) |stored_pass| {
             return verifyPassword(stored_pass, pass);
         }
 
+        // Dummy verification to equalize timing with valid-user path
+        _ = verifyPassword("dummy_timing_equalization", pass);
         return false;
     }
 
-    /// Verify a password against stored value (plain or hashed)
+    /// Verify a password against stored value (plain or hashed).
+    /// Always compares SHA-256 digests using constant-time comparison
+    /// to prevent timing attacks regardless of storage format.
     fn verifyPassword(stored: []const u8, provided: []const u8) bool {
+        // Hash the provided password
+        var provided_digest: [SHA256_DIGEST_LENGTH]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(provided, &provided_digest, .{});
+
         const format = detectPasswordFormat(stored);
 
-        return switch (format) {
-            .plain => cryptoEq(u8, provided, stored),
+        var stored_digest: [SHA256_DIGEST_LENGTH]u8 = undefined;
+        switch (format) {
+            .plain => {
+                // Hash the stored plain password for constant-time comparison
+                std.crypto.hash.sha2.Sha256.hash(stored, &stored_digest, .{});
+            },
             .sha256 => {
-                // stored format: {SHA256}hex_digest
-                if (stored.len < 9) return false; // {SHA256} + at least 1 char
-
-                var digest: [SHA256_DIGEST_LENGTH]u8 = undefined;
-                std.crypto.hash.sha2.Sha256.hash(provided, &digest, .{});
-
+                // Parse hex digest from stored value: {SHA256}hex_digest
+                if (stored.len != 8 + SHA256_DIGEST_LENGTH * 2) return false;
                 const hex_digest = stored[8..];
-                if (hex_digest.len != SHA256_DIGEST_LENGTH * 2) return false;
 
-                // Constant-time hex comparison
-                var i: usize = 0;
-                var result: u8 = 0;
-                while (i < SHA256_DIGEST_LENGTH) : (i += 1) {
+                for (0..SHA256_DIGEST_LENGTH) |i| {
                     const upper = std.fmt.charToDigit(hex_digest[i * 2], 16) catch return false;
                     const lower = std.fmt.charToDigit(hex_digest[i * 2 + 1], 16) catch return false;
-                    const stored_byte = (upper << 4) | lower;
-                    result |= digest[i] ^ stored_byte;
+                    stored_digest[i] = (upper << 4) | lower;
                 }
-                return result == 0;
             },
-        };
+        }
+
+        return std.crypto.timing_safe.eql([SHA256_DIGEST_LENGTH]u8, provided_digest, stored_digest);
     }
 
     /// Detect password format from stored value
@@ -201,16 +210,6 @@ pub const BasicAuth = struct {
             return .sha256;
         }
         return .plain;
-    }
-
-    /// Constant-time equality check to prevent timing attacks
-    inline fn cryptoEq(comptime T: type, a: []const T, b: []const T) bool {
-        if (a.len != b.len) return false;
-        var result: T = 0;
-        for (a, 0..) |x, i| {
-            result |= x ^ b[i];
-        }
-        return result == 0;
     }
 
     /// Free all resources
@@ -227,58 +226,6 @@ pub const BasicAuth = struct {
         }
     }
 };
-
-/// Base64 decode (RFC 4648)
-fn base64Decode(encoded: []const u8, dest: []u8) ![]u8 {
-    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    var out_idx: usize = 0;
-    var buf: u32 = 0;
-    var buf_len: u3 = 0;
-
-    for (encoded) |c| {
-        if (c == '=') break; // Padding
-        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') continue; // Skip whitespace
-
-        const val: u6 = blk: {
-            for (alphabet, 0..) |a, i| {
-                if (c == a) break :blk @intCast(i);
-            }
-            return error.InvalidBase64;
-        };
-
-        buf = (buf << 6) | val;
-        buf_len += 1;
-
-        if (buf_len == 4) {
-            if (out_idx + 3 > dest.len) return error.NoSpaceLeft;
-            dest[out_idx] = @intCast((buf >> 16) & 0xFF);
-            dest[out_idx + 1] = @intCast((buf >> 8) & 0xFF);
-            dest[out_idx + 2] = @intCast(buf & 0xFF);
-            out_idx += 3;
-            buf = 0;
-            buf_len = 0;
-        }
-    }
-
-    // Handle remaining bytes
-    switch (buf_len) {
-        2 => {
-            if (out_idx + 1 > dest.len) return error.NoSpaceLeft;
-            dest[out_idx] = @intCast((buf >> 4) & 0xFF);
-            out_idx += 1;
-        },
-        3 => {
-            if (out_idx + 2 > dest.len) return error.NoSpaceLeft;
-            dest[out_idx] = @intCast((buf >> 10) & 0xFF);
-            dest[out_idx + 1] = @intCast((buf >> 2) & 0xFF);
-            out_idx += 2;
-        },
-        else => {},
-    }
-
-    return dest[0..out_idx];
-}
 
 /// Build a 407 Proxy Authentication Required response
 pub fn build407Response(realm: []const u8, buf: []u8) ![]u8 {
@@ -333,20 +280,24 @@ test "BasicAuth multiple users" {
     try std.testing.expect(auth.verify("Basic Ym9iOnBhc3N3b3JkMg=="));
 }
 
-test "base64 decode" {
+test "base64 decode via std.base64" {
     var buf: [64]u8 = undefined;
+    const decoder = std.base64.standard.Decoder;
 
     // "Hello" -> "SGVsbG8="
-    const result1 = try base64Decode("SGVsbG8=", &buf);
-    try std.testing.expectEqualStrings("Hello", result1);
+    const len1 = try decoder.calcSizeForSlice("SGVsbG8=");
+    try decoder.decode(buf[0..len1], "SGVsbG8=");
+    try std.testing.expectEqualStrings("Hello", buf[0..len1]);
 
     // "user:pass" -> "dXNlcjpwYXNz"
-    const result2 = try base64Decode("dXNlcjpwYXNz", &buf);
-    try std.testing.expectEqualStrings("user:pass", result2);
+    const len2 = try decoder.calcSizeForSlice("dXNlcjpwYXNz");
+    try decoder.decode(buf[0..len2], "dXNlcjpwYXNz");
+    try std.testing.expectEqualStrings("user:pass", buf[0..len2]);
 
     // "admin:secret123" -> "YWRtaW46c2VjcmV0MTIz"
-    const result3 = try base64Decode("YWRtaW46c2VjcmV0MTIz", &buf);
-    try std.testing.expectEqualStrings("admin:secret123", result3);
+    const len3 = try decoder.calcSizeForSlice("YWRtaW46c2VjcmV0MTIz");
+    try decoder.decode(buf[0..len3], "YWRtaW46c2VjcmV0MTIz");
+    try std.testing.expectEqualStrings("admin:secret123", buf[0..len3]);
 }
 
 test "build 407 response" {

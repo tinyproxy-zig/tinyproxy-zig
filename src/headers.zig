@@ -297,7 +297,7 @@ test "isHopByHop detects hop-by-hop headers" {
     try std.testing.expect(isHopByHop("connection"));
     try std.testing.expect(isHopByHop("PROXY-CONNECTION"));
     try std.testing.expect(isHopByHop("Keep-Alive"));
-    try std.testing.expect(isHopByHop("Transfer-Encoding"));
+    try std.testing.expect(!isHopByHop("Transfer-Encoding")); // Preserved: forwarded as-is
     try std.testing.expect(!isHopByHop("Content-Type"));
     try std.testing.expect(!isHopByHop("Host"));
     try std.testing.expect(!isHopByHop("Accept"));

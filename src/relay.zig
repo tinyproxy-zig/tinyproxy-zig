@@ -60,21 +60,21 @@ pub fn copy_bidi(rt: *zio.Runtime, a: zio.net.Stream, b: zio.net.Stream) !void {
     var a_to_b = try rt.spawn(copy_one, .{ rt, a, b });
     var b_to_a = try rt.spawn(copy_one, .{ rt, b, a });
 
-    // Wait for both to complete
-    // When one direction completes (successfully or with error), the other
-    // will get a read/write error on the closed socket and exit quickly.
     var a_err: ?anyerror = null;
     var b_err: ?anyerror = null;
 
-    // Wait for a_to_b first
+    // Wait for a→b: when done, half-close b's write side so the remote
+    // peer receives EOF and the b→a direction can drain and finish.
     a_to_b.join() catch |err| {
         a_err = err;
     };
+    b.shutdown(.send) catch {};
 
-    // Now wait for b_to_a - it should complete quickly since a side is done
+    // Wait for b→a: when done, half-close a's write side.
     b_to_a.join() catch |err| {
         b_err = err;
     };
+    a.shutdown(.send) catch {};
 
     // Return first non-EndOfStream error if any
     // EndOfStream is expected when one side closes connection normally

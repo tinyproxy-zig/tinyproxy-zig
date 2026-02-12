@@ -645,6 +645,12 @@ fn strip_return_port(host: []u8) struct { port: u16, new_len: usize } {
     return .{ .port = port, .new_len = colon_pos };
 }
 
+/// Check if a string contains characters unsafe for HTTP header interpolation.
+/// Prevents CRLF injection / HTTP request smuggling.
+fn containsHttpUnsafe(s: []const u8) bool {
+    return std.mem.indexOfAny(u8, s, "\r\n\x00") != null;
+}
+
 fn extract_url(allocator: std.mem.Allocator, url: []const u8, default_port: u16, req: *Request) !void {
     const slash_pos = std.mem.indexOf(u8, url, "/");
 
@@ -654,6 +660,11 @@ fn extract_url(allocator: std.mem.Allocator, url: []const u8, default_port: u16,
     // Validate hostname length to prevent DoS
     if (host_part.len > MAX_HOSTNAME_LENGTH) {
         return error.HostnameTooLong;
+    }
+
+    // Validate host and path against CRLF injection (HTTP header injection / request smuggling)
+    if (containsHttpUnsafe(host_part) or containsHttpUnsafe(path_part)) {
+        return error.BadRequest;
     }
 
     var host_buffer = try allocator.dupe(u8, host_part);
@@ -755,6 +766,23 @@ test "process_request with absolute URL" {
     try std.testing.expectEqualStrings("example.com", req.host);
     try std.testing.expectEqualStrings("/hello", req.path);
     try std.testing.expectEqual(@as(u16, 80), req.port);
+}
+
+test "reject host with CRLF injection" {
+    var header_map = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer header_map.deinit();
+
+    // Host containing \r\n should be rejected
+    const req_line = "GET http://evil.com\r\nInjected: header/path HTTP/1.1";
+    try std.testing.expectError(error.BadRequest, process_request_line(std.testing.allocator, req_line, &header_map));
+}
+
+test "reject host with null byte" {
+    var header_map = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer header_map.deinit();
+
+    const req_line = "GET http://evil.com\x00injected/path HTTP/1.1";
+    try std.testing.expectError(error.BadRequest, process_request_line(std.testing.allocator, req_line, &header_map));
 }
 
 test "append addheader entries to message" {
